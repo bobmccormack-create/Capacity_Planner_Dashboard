@@ -106,32 +106,76 @@ class ZohoClient:
     # ---------------- Zoho Projects ----------------
 
     def get_projects(self) -> List[dict]:
-        """All projects in the configured portal."""
+        """
+        All projects in the configured portal.
+
+        This endpoint paginates - a single unparameterized call only
+        returns the first page (Zoho's default page size). Every prior
+        run of this dashboard has shown "100 projects", which is exactly
+        the kind of round number a default page size produces, so this
+        pages through with explicit index/range until a short page says
+        there's nothing left, instead of assuming one page is everything.
+        """
         url = f"{settings.zoho_projects_base()}/restapi/portal/{settings.ZOHO_PORTAL_ID}/projects/"
-        data = self._get(url)
-        return data.get("projects", [])
+        page_size = 100
+        index = 1
+        all_projects: List[dict] = []
+        while True:
+            data = self._get(url, params={"index": index, "range": page_size})
+            page = data.get("projects", [])
+            all_projects.extend(page)
+            if len(page) < page_size:
+                break
+            index += page_size
+        return all_projects
+
+    def get_active_projects(self) -> List[dict]:
+        """
+        Projects with status "active", excluding completed/archived ones.
+
+        Once pagination was fixed, get_projects() went from 100 to 351 -
+        looping tasks over all 351 one at a time (even paced) could take
+        several minutes per load. Most of those extra 251 are completed/
+        archived jobs that don't need a live task count, so both the
+        Projects KPI and the task-aggregation loop use this narrower,
+        much faster list instead.
+        """
+        return [p for p in self.get_projects() if str(p.get("status", "")).lower() == "active"]
 
     def get_tasks(self, project_id: str = None) -> List[dict]:
         """
         All tasks for a project. If project_id isn't given, uses
         ZOHO_PROJECTS_PROJECT_ID from settings, or falls back to
-        aggregating tasks across every project (slower - one call each,
-        paced to stay under Zoho's rate limit).
+        aggregating tasks across every *active* project (slower - one
+        call each, paced to stay under Zoho's rate limit).
         """
         project_id = project_id or settings.ZOHO_PROJECTS_PROJECT_ID
-        base = settings.zoho_projects_base()
-        portal = settings.ZOHO_PORTAL_ID
 
         if project_id:
+            base = settings.zoho_projects_base()
+            portal = settings.ZOHO_PORTAL_ID
             url = f"{base}/restapi/portal/{portal}/projects/{project_id}/tasks/"
             data = self._get(url)
             return data.get("tasks", [])
 
-        # No single project configured: aggregate across all projects.
+        # No single project configured: aggregate across all *active*
+        # projects (see get_active_projects() for why not all 351).
+        return self.get_tasks_for_projects(self.get_active_projects())
+
+    def get_tasks_for_projects(self, projects: List[dict]) -> List[dict]:
+        """
+        Same aggregation as get_tasks()'s "all projects" path, but takes
+        an already-fetched project list - so a caller that also needs the
+        project list itself (e.g. for the Projects count) can fetch it
+        once instead of paying for the paginated projects call twice.
+        """
+        base = settings.zoho_projects_base()
+        portal = settings.ZOHO_PORTAL_ID
+
         all_tasks: List[dict] = []
         attempted = 0
         failed = 0
-        for project in self.get_projects():
+        for project in projects:
             pid = project.get("id") or project.get("id_string")
             if not pid:
                 continue
@@ -179,6 +223,32 @@ class ZohoClient:
         url = f"{settings.zoho_crm_base()}/crm/v6/users"
         data = self._get(url, params={"type": "ActiveUsers"})
         return data.get("users", [])
+
+    def get_calendar_events(self, per_page: int = 200) -> List[dict]:
+        """
+        Events from Zoho CRM's built-in Calendar (crm.zoho.com/.../calendar)
+        - this is the CRM "Events" module, not a separate Zoho Calendar
+        product, so it reuses the same CRM OAuth token/scope as
+        get_cases()/get_crm_users() rather than needing its own app
+        registration.
+
+        Zoho's v6 Events endpoint only allows sorting by id, Created_Time
+        or Modified_Time server-side (confirmed live - it 400s on anything
+        else, including the obvious Start_DateTime) - so we don't ask it
+        to sort at all, and instead sort by Start_DateTime ourselves once
+        the records are back.
+        """
+        url = f"{settings.zoho_crm_base()}/crm/v6/Events"
+        data = self._get(
+            url,
+            params={
+                "fields": "Event_Title,Start_DateTime,End_DateTime,Owner,Who_Id,What_Id,Description",
+                "per_page": per_page,
+            },
+        )
+        events = data.get("data", [])
+        events.sort(key=lambda e: e.get("Start_DateTime") or "", reverse=True)
+        return events
 
 
 zoho_client = ZohoClient()

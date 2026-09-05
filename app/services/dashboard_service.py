@@ -84,8 +84,14 @@ class DashboardService:
 @st.cache_data(ttl=settings.CACHE_TTL_SECONDS, show_spinner="Fetching latest data from Zoho...")
 def _fetch_kpis_cached() -> dict:
     try:
-        projects = zoho_client.get_projects()
-        tasks = zoho_client.get_tasks()
+        # Fetch the active-project list once and reuse it for both the
+        # Projects count and the task aggregation, instead of paying for
+        # the (paginated, now ~350-project) projects call twice. Completed/
+        # archived projects are excluded from both so the two numbers stay
+        # consistent with each other.
+        active_projects = zoho_client.get_active_projects()
+        projects = active_projects
+        tasks = zoho_client.get_tasks_for_projects(active_projects)
         cases = zoho_client.get_cases()
         users = zoho_client.get_crm_users()
 
