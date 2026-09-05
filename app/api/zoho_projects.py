@@ -30,7 +30,9 @@ logger = get_logger(__name__)
 
 # Pause between per-project task requests when aggregating across every
 # project, to avoid bursting past Zoho's rate limit in the first place.
-_TASK_LOOP_DELAY_SECONDS = 0.25
+# (Zoho doesn't publish an exact number for this endpoint, so this errs
+# conservative rather than tuning to a guessed threshold.)
+_TASK_LOOP_DELAY_SECONDS = 0.5
 
 # How many times to retry a single request after a 429 (Too Many Requests)
 # before giving up on it, waiting longer each time.
