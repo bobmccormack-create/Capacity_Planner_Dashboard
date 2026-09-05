@@ -62,9 +62,33 @@ class DashboardService:
         "events" is sorted soonest-first and filtered to events that
         haven't fully ended yet and start within `days_ahead` days from
         now - i.e. "what's coming up", not the full history of every
-        calendar entry ever created.
+        calendar entry ever created. Superseded by get_calendar_range()
+        for the dashboard's grid view (which needs whole months, including
+        days already past), but left in place in case an agenda-style
+        list is useful again later.
         """
         return _fetch_upcoming_events_cached(days_ahead)
+
+    def get_calendar_range(self, start_date: dt.date, end_date: dt.date) -> dict:
+        """
+        Returns: {"events": [ {..raw Zoho event fields.., "start": datetime,
+                   "end": datetime, "tech_name": str,
+                   "participant_names": [str, ...]} ], "error": str | None}
+
+        Unlike get_upcoming_events, this is date-range based rather than
+        "from now forward" - it includes events already in the past, which
+        a month-grid view needs (e.g. showing Sept 1-4 even when today is
+        Sept 5). An event is included if any part of it falls on or
+        between start_date and end_date (inclusive).
+
+        tech_name/participant_names: which Zoho field actually represents
+        "the assigned tech" hasn't been confirmed against a real account
+        yet - Owner could just be whoever in the office created the
+        calendar entry, not the tech doing the job. Both are extracted so
+        this can be checked against real data and corrected if Owner turns
+        out to be wrong.
+        """
+        return _fetch_calendar_range_cached(start_date, end_date)
 
     @staticmethod
     def _save_snapshot(kpis: dict) -> None:
@@ -181,3 +205,68 @@ def _fetch_upcoming_events_cached(days_ahead: int) -> dict:
 
     upcoming.sort(key=lambda e: e["start"])
     return {"events": upcoming, "error": None}
+
+
+def _extract_tech_name(event: dict) -> str:
+    """
+    Best guess at "who's assigned" - the Zoho Events "Owner" field, a
+    {id, name, email} reference to a CRM user. Unconfirmed whether this
+    is actually the tech doing the job vs. whoever in the office created
+    the entry - see get_calendar_range()'s docstring.
+    """
+    owner = event.get("Owner")
+    if isinstance(owner, dict):
+        return owner.get("name") or owner.get("email") or "Unassigned"
+    return "Unassigned"
+
+
+def _extract_participant_names(event: dict) -> list:
+    """
+    Zoho Events "Participants" is a list of {type: 'user'|'contact'|...,
+    name/Full_Name, email, ...} objects - defensive about the exact shape
+    since it hasn't been checked against a real event yet.
+    """
+    participants = event.get("Participants")
+    names = []
+    if isinstance(participants, list):
+        for p in participants:
+            if not isinstance(p, dict):
+                continue
+            name = p.get("name") or p.get("Full_Name") or p.get("email")
+            if name:
+                names.append(name)
+    return names
+
+
+@st.cache_data(ttl=settings.CACHE_TTL_SECONDS, show_spinner="Fetching calendar...")
+def _fetch_calendar_range_cached(start_date: dt.date, end_date: dt.date) -> dict:
+    try:
+        raw_events = zoho_client.get_calendar_events()
+    except ZohoAPIError as exc:
+        logger.warning("Calendar fetch failed: %s", exc)
+        return {"events": [], "error": str(exc)}
+
+    in_range = []
+    for event in raw_events:
+        start = _parse_zoho_datetime(event.get("Start_DateTime"))
+        end = _parse_zoho_datetime(event.get("End_DateTime")) or start
+        if start is None:
+            continue
+        # Compare using each event's own local date (its Zoho offset is
+        # assumed to already be this company's local time zone) rather
+        # than converting to UTC - simpler, and correct for a single-
+        # location business where every event uses the same offset.
+        event_start_date = start.date()
+        event_end_date = (end or start).date()
+        if event_end_date < start_date or event_start_date > end_date:
+            continue
+        in_range.append({
+            **event,
+            "start": start,
+            "end": end,
+            "tech_name": _extract_tech_name(event),
+            "participant_names": _extract_participant_names(event),
+        })
+
+    in_range.sort(key=lambda e: e["start"])
+    return {"events": in_range, "error": None}

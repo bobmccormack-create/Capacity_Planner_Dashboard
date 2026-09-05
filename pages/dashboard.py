@@ -1,7 +1,29 @@
+import calendar
+import datetime as dt
+import html as html_lib
+
 import streamlit as st
 
 from app.services.dashboard_service import DashboardService
 from app.utils.auth import check_password
+
+# Categorical palette (fixed order - never cycled/reassigned) from the
+# house data-viz palette: colorblind-safe adjacent pairs, validated for a
+# light surface. One color per tech, assigned in order of first
+# appearance in the fetched events - not by name, so the same tech
+# doesn't jump colors just because a different tech happened to get
+# fetched first on some other day.
+_TECH_COLORS = [
+    "#2a78d6",  # blue
+    "#eb6834",  # orange
+    "#1baf7a",  # aqua
+    "#eda100",  # yellow
+    "#e87ba4",  # magenta
+    "#008300",  # green
+    "#4a3aa7",  # violet
+    "#e34948",  # red
+]
+_OVERFLOW_COLOR = "#898781"  # muted gray - for the 9th+ tech, and "Unassigned"
 
 
 def _format_time(moment) -> str:
@@ -14,41 +36,189 @@ def _format_time(moment) -> str:
     return moment.strftime("%I:%M %p").lstrip("0")
 
 
-def _render_upcoming_schedule(service: DashboardService) -> None:
-    st.subheader("📅 Upcoming Schedule")
-    st.caption("From Zoho CRM's Calendar - next 14 days")
+def _assign_tech_colors(events: list) -> dict:
+    """
+    tech_name -> hex color, first-seen order. Beyond 8 distinct techs,
+    everyone past the 8th shares the same muted gray - per the palette's
+    own rule, color is never manufactured past the validated slots, and
+    identity still comes through in the visible name text either way, not
+    the color alone.
+    """
+    colors = {}
+    for event in events:
+        name = event.get("tech_name") or "Unassigned"
+        if name not in colors:
+            colors[name] = (
+                _TECH_COLORS[len(colors)] if len(colors) < len(_TECH_COLORS) else _OVERFLOW_COLOR
+            )
+    return colors
 
-    schedule = service.get_upcoming_events(days_ahead=14)
+
+def _month_grid_html(year: int, month: int, events_by_day: dict, tech_colors: dict) -> str:
+    """
+    One month as an HTML table: a weekday header row, then a row per
+    week. Cells outside `year`/`month` (the leading/trailing days
+    Calendar.monthdatescalendar pads each first/last week with) show only
+    a dimmed date number - events are only plotted on their actual day,
+    never duplicated onto a neighboring month's cell for the same date.
+    """
+    cal = calendar.Calendar(firstweekday=6)  # weeks start Sunday
+    weeks = cal.monthdatescalendar(year, month)
+    month_label = dt.date(year, month, 1).strftime("%B %Y")
+
+    parts = [f'<div class="cal-month"><div class="cal-month-title">{month_label}</div>']
+    parts.append('<table class="cal-grid"><thead><tr>')
+    for wd in ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"):
+        parts.append(f"<th>{wd}</th>")
+    parts.append("</tr></thead><tbody>")
+
+    today = dt.date.today()
+    for week in weeks:
+        parts.append("<tr>")
+        for day in week:
+            in_month = day.month == month
+            is_today = day == today
+            cell_classes = "cal-day" + ("" if in_month else " cal-day-outside") + (
+                " cal-day-today" if is_today else ""
+            )
+            parts.append(f'<td class="{cell_classes}"><div class="cal-day-num">{day.day}</div>')
+
+            if in_month:
+                day_events = events_by_day.get(day, [])
+                shown, extra = day_events[:3], day_events[3:]
+                for event in shown:
+                    title = html_lib.escape(event.get("Event_Title") or "(untitled event)")
+                    tech = html_lib.escape(event.get("tech_name") or "Unassigned")
+                    color = tech_colors.get(event.get("tech_name") or "Unassigned", _OVERFLOW_COLOR)
+                    time_str = html_lib.escape(_format_time(event["start"]))
+                    tooltip = html_lib.escape(
+                        f"{event.get('Event_Title') or '(untitled event)'}\n"
+                        f"{_format_time(event['start'])}"
+                        + (f" - {_format_time(event['end'])}" if event.get("end") else "")
+                        + f"\nTech: {event.get('tech_name') or 'Unassigned'}"
+                    )
+                    parts.append(
+                        f'<div class="cal-chip" style="border-left-color:{color}" title="{tooltip}">'
+                        f'<span class="cal-chip-time">{time_str}</span> '
+                        f'<span class="cal-chip-tech" style="color:{color}">{tech}</span>'
+                        f'<div class="cal-chip-title">{title}</div>'
+                        f"</div>"
+                    )
+                if extra:
+                    parts.append(f'<div class="cal-more">+{len(extra)} more</div>')
+
+            parts.append("</td>")
+        parts.append("</tr>")
+
+    parts.append("</tbody></table></div>")
+    return "".join(parts)
+
+
+_CALENDAR_CSS = """
+<style>
+.cal-wrap { display: flex; gap: 24px; flex-wrap: wrap; }
+.cal-month { flex: 1 1 420px; min-width: 340px; }
+.cal-month-title { font-weight: 600; font-size: 1.05rem; margin-bottom: 8px; color: #0b0b0b; }
+.cal-grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.cal-grid th {
+    font-size: 0.72rem; font-weight: 600; color: #898781; text-transform: uppercase;
+    padding: 4px 2px; text-align: left; border-bottom: 1px solid #e1e0d9;
+}
+.cal-day {
+    vertical-align: top; border: 1px solid #e1e0d9; height: 92px; width: 14.28%;
+    padding: 3px; overflow: hidden;
+}
+.cal-day-outside { background: #f9f9f7; }
+.cal-day-outside .cal-day-num { color: #c3c2b7; }
+.cal-day-today { background: #f0f6ff; }
+.cal-day-num { font-size: 0.78rem; color: #52514e; margin-bottom: 2px; }
+.cal-chip {
+    border-left: 3px solid; padding: 1px 4px; margin-bottom: 2px; border-radius: 2px;
+    background: #fcfcfb; font-size: 0.68rem; line-height: 1.25; cursor: default;
+}
+.cal-chip-time { color: #52514e; font-weight: 600; }
+.cal-chip-tech { font-weight: 600; }
+.cal-chip-title { color: #0b0b0b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-more { font-size: 0.66rem; color: #898781; padding-left: 4px; }
+.cal-legend { margin-top: 10px; font-size: 0.8rem; }
+.cal-legend-item { display: inline-flex; align-items: center; gap: 5px; margin-right: 14px; }
+.cal-legend-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+@media (prefers-color-scheme: dark) {
+    .cal-month-title { color: #ffffff; }
+    .cal-grid th { color: #c3c2b7; border-bottom-color: #2c2c2a; }
+    .cal-day { border-color: #2c2c2a; }
+    .cal-day-outside { background: #0d0d0d; }
+    .cal-day-outside .cal-day-num { color: #383835; }
+    .cal-day-today { background: #16202c; }
+    .cal-day-num { color: #c3c2b7; }
+    .cal-chip { background: #1a1a19; }
+    .cal-chip-time { color: #c3c2b7; }
+    .cal-chip-title { color: #ffffff; }
+}
+</style>
+"""
+
+
+def _render_calendar_view(service: DashboardService) -> None:
+    st.subheader("📅 Schedule")
+    st.caption("From Zoho CRM's Calendar - this month and next")
+
+    today = dt.date.today()
+    month1_year, month1 = today.year, today.month
+    month2_year, month2 = (today.year, today.month + 1) if today.month < 12 else (today.year + 1, 1)
+
+    # Fetch across the full span both grids actually display, including
+    # the leading/trailing days from neighboring months each grid pads
+    # its first/last week with - otherwise those padding cells would
+    # always show empty even when Zoho has an event on that exact date.
+    weeks1 = calendar.Calendar(firstweekday=6).monthdatescalendar(month1_year, month1)
+    weeks2 = calendar.Calendar(firstweekday=6).monthdatescalendar(month2_year, month2)
+    range_start = weeks1[0][0]
+    range_end = weeks2[-1][-1]
+
+    schedule = service.get_calendar_range(range_start, range_end)
 
     if schedule["error"] and not schedule["events"]:
         st.warning(f"Couldn't load the calendar right now. ({schedule['error']})")
         return
 
     events = schedule["events"]
-    if not events:
-        st.info("Nothing on the calendar in the next 14 days.")
-        return
+    tech_colors = _assign_tech_colors(events)
 
-    # Group consecutive events by the calendar day they start on, so the
-    # page reads like an agenda ("Mon, Sep 8" then its events) rather than
-    # one long flat list.
-    current_day = None
+    events_by_day: dict = {}
     for event in events:
-        day = event["start"].date()
-        if day != current_day:
-            current_day = day
-            # Same reasoning as _format_time: build the "Sep 8" part by
-            # hand instead of strftime's '%-d', which isn't portable to
-            # Windows.
-            st.markdown(f"**{day.strftime('%A, %b')} {day.day}**")
-        title = event.get("Event_Title") or "(untitled event)"
-        time_range = _format_time(event["start"])
-        if event.get("end") and event["end"] != event["start"]:
-            time_range += f" – {_format_time(event['end'])}"
-        st.markdown(f"&nbsp;&nbsp;🕒 {time_range} — {title}")
+        events_by_day.setdefault(event["start"].date(), []).append(event)
+
+    grid_html = (
+        _CALENDAR_CSS
+        + '<div class="cal-wrap">'
+        + _month_grid_html(month1_year, month1, events_by_day, tech_colors)
+        + _month_grid_html(month2_year, month2, events_by_day, tech_colors)
+        + "</div>"
+    )
+    st.markdown(grid_html, unsafe_allow_html=True)
+
+    if tech_colors:
+        legend_items = "".join(
+            f'<span class="cal-legend-item"><span class="cal-legend-swatch" '
+            f'style="background:{color}"></span>{html_lib.escape(name)}</span>'
+            for name, color in tech_colors.items()
+        )
+        st.markdown(
+            _CALENDAR_CSS + f'<div class="cal-legend">{legend_items}</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Tech names are Zoho's Owner field on each event - not yet confirmed this is "
+            "the assigned tech rather than whoever created the entry. Let me know if these "
+            "look wrong and I'll switch it to a different field."
+        )
+
+    if not events and not schedule["error"]:
+        st.info("Nothing on the calendar in either month.")
 
     if schedule["error"]:
-        st.caption(f"Note: showing possibly-stale data - last refresh had an error ({schedule['error']})")
+        st.caption(f"Note: showing possibly-incomplete data - last refresh had an error ({schedule['error']})")
 
 
 def render():
@@ -89,7 +259,7 @@ def render():
 
     st.divider()
 
-    _render_upcoming_schedule(service)
+    _render_calendar_view(service)
 
 
 # Streamlit's "pages/" folder is auto-detected and turned into a multipage

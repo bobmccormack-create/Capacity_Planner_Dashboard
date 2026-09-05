@@ -224,7 +224,7 @@ class ZohoClient:
         data = self._get(url, params={"type": "ActiveUsers"})
         return data.get("users", [])
 
-    def get_calendar_events(self, per_page: int = 200) -> List[dict]:
+    def get_calendar_events(self, per_page: int = 200, max_pages: int = 5) -> List[dict]:
         """
         Events from Zoho CRM's built-in Calendar (crm.zoho.com/.../calendar)
         - this is the CRM "Events" module, not a separate Zoho Calendar
@@ -245,22 +245,48 @@ class ZohoClient:
         fix. Sorting by Modified_Time descending means "most recently
         touched" events come back first, which for an actively-used
         schedule is a much better proxy for "current/upcoming" than
-        insertion order. We still re-sort the returned page by
-        Start_DateTime client-side afterward, for display order.
+        insertion order.
+
+        Also paginates (up to max_pages) rather than trusting a single
+        page - a 2-month calendar view needs more than 200 events'
+        headroom for a busy schedule, and we already got burned once this
+        project by assuming a single default page was "everything"
+        (get_projects()). Capped at max_pages rather than unbounded,
+        since pages past that are increasingly stale (oldest-modified)
+        and not worth the extra round trips for a forward-looking view.
+
+        Participants is included alongside Owner because it's not yet
+        confirmed which one actually reflects "which tech is on this job"
+        for this account's setup - Owner might just be whoever in the
+        office created the entry. Both are returned as raw Zoho fields;
+        callers should treat this as unverified until checked against a
+        real event.
         """
         url = f"{settings.zoho_crm_base()}/crm/v6/Events"
-        data = self._get(
-            url,
-            params={
-                "fields": "Event_Title,Start_DateTime,End_DateTime,Owner,Who_Id,What_Id,Description",
-                "per_page": per_page,
-                "sort_by": "Modified_Time",
-                "sort_order": "desc",
-            },
+        fields = (
+            "Event_Title,Start_DateTime,End_DateTime,Owner,Who_Id,What_Id,"
+            "Description,Participants"
         )
-        events = data.get("data", [])
-        events.sort(key=lambda e: e.get("Start_DateTime") or "", reverse=True)
-        return events
+        all_events: List[dict] = []
+        page = 1
+        while page <= max_pages:
+            data = self._get(
+                url,
+                params={
+                    "fields": fields,
+                    "per_page": per_page,
+                    "sort_by": "Modified_Time",
+                    "sort_order": "desc",
+                    "page": page,
+                },
+            )
+            all_events.extend(data.get("data", []))
+            if not (data.get("info") or {}).get("more_records"):
+                break
+            page += 1
+
+        all_events.sort(key=lambda e: e.get("Start_DateTime") or "", reverse=True)
+        return all_events
 
 
 zoho_client = ZohoClient()
