@@ -54,106 +54,96 @@ def _assign_tech_colors(events: list) -> dict:
     return colors
 
 
-def _month_grid_html(year: int, month: int, events_by_day: dict, tech_colors: dict) -> str:
-    """
-    One month as an HTML table: a weekday header row, then a row per
-    week. Cells outside `year`/`month` (the leading/trailing days
-    Calendar.monthdatescalendar pads each first/last week with) show only
-    a dimmed date number - events are only plotted on their actual day,
-    never duplicated onto a neighboring month's cell for the same date.
-    """
-    cal = calendar.Calendar(firstweekday=6)  # weeks start Sunday
-    weeks = cal.monthdatescalendar(year, month)
-    month_label = dt.date(year, month, 1).strftime("%B %Y")
+def _last_day_of_month(year: int, month: int) -> dt.date:
+    return dt.date(year, month, calendar.monthrange(year, month)[1])
 
-    parts = [f'<div class="cal-month"><div class="cal-month-title">{month_label}</div>']
-    parts.append('<table class="cal-grid"><thead><tr>')
-    for wd in ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"):
-        parts.append(f"<th>{wd}</th>")
-    parts.append("</tr></thead><tbody>")
 
+def _day_by_day_html(range_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict) -> str:
+    """
+    One row per calendar day (including empty ones, shown minimally, so a
+    light day still reads as "nothing scheduled" rather than just
+    vanishing from the list) inside a single scrollable panel - the
+    "blown up, scrollable, day by day" view, as opposed to the cramped
+    small-cell month grid this replaces. Every event is shown in full,
+    nothing truncated with a "+N more".
+    """
     today = dt.date.today()
-    for week in weeks:
-        parts.append("<tr>")
-        for day in week:
-            in_month = day.month == month
-            is_today = day == today
-            cell_classes = "cal-day" + ("" if in_month else " cal-day-outside") + (
-                " cal-day-today" if is_today else ""
-            )
-            parts.append(f'<td class="{cell_classes}"><div class="cal-day-num">{day.day}</div>')
+    parts = ['<div class="agenda-wrap">']
 
-            if in_month:
-                day_events = events_by_day.get(day, [])
-                shown, extra = day_events[:3], day_events[3:]
-                for event in shown:
-                    title = html_lib.escape(event.get("Event_Title") or "(untitled event)")
-                    tech = html_lib.escape(event.get("tech_name") or "Unassigned")
-                    color = tech_colors.get(event.get("tech_name") or "Unassigned", _OVERFLOW_COLOR)
-                    time_str = html_lib.escape(_format_time(event["start"]))
-                    tooltip = html_lib.escape(
-                        f"{event.get('Event_Title') or '(untitled event)'}\n"
-                        f"{_format_time(event['start'])}"
-                        + (f" - {_format_time(event['end'])}" if event.get("end") else "")
-                        + f"\nTech: {event.get('tech_name') or 'Unassigned'}"
-                    )
-                    parts.append(
-                        f'<div class="cal-chip" style="border-left-color:{color}" title="{tooltip}">'
-                        f'<span class="cal-chip-time">{time_str}</span> '
-                        f'<span class="cal-chip-tech" style="color:{color}">{tech}</span>'
-                        f'<div class="cal-chip-title">{title}</div>'
-                        f"</div>"
-                    )
-                if extra:
-                    parts.append(f'<div class="cal-more">+{len(extra)} more</div>')
+    current = range_start
+    while current <= range_end:
+        is_today = current == today
+        day_label = f"{current.strftime('%A, %B')} {current.day}"
+        if is_today:
+            day_label += " — Today"
+        header_class = "agenda-day-header" + (" agenda-day-header-today" if is_today else "")
+        parts.append(
+            f'<div class="agenda-day"><div class="{header_class}">'
+            f"{html_lib.escape(day_label)}</div>"
+        )
 
-            parts.append("</td>")
-        parts.append("</tr>")
+        day_events = events_by_day.get(current, [])
+        if not day_events:
+            parts.append('<div class="agenda-empty">No jobs scheduled</div>')
+        else:
+            for event in day_events:
+                title = html_lib.escape(event.get("Event_Title") or "(untitled event)")
+                tech = html_lib.escape(event.get("tech_name") or "Unassigned")
+                color = tech_colors.get(event.get("tech_name") or "Unassigned", _OVERFLOW_COLOR)
+                time_str = html_lib.escape(_format_time(event["start"]))
+                if event.get("end") and event["end"] != event["start"]:
+                    time_str += f" – {html_lib.escape(_format_time(event['end']))}"
+                parts.append(
+                    f'<div class="agenda-event" style="border-left-color:{color}">'
+                    f'<div class="agenda-event-top">'
+                    f'<span class="agenda-event-time">{time_str}</span>'
+                    f'<span class="agenda-event-tech" style="background:{color}">{tech}</span>'
+                    f"</div>"
+                    f'<div class="agenda-event-title">{title}</div>'
+                    f"</div>"
+                )
+        parts.append("</div>")
+        current += dt.timedelta(days=1)
 
-    parts.append("</tbody></table></div>")
+    parts.append("</div>")
     return "".join(parts)
 
 
 _CALENDAR_CSS = """
 <style>
-.cal-wrap { display: flex; gap: 24px; flex-wrap: wrap; }
-.cal-month { flex: 1 1 420px; min-width: 340px; }
-.cal-month-title { font-weight: 600; font-size: 1.05rem; margin-bottom: 8px; color: #0b0b0b; }
-.cal-grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.cal-grid th {
-    font-size: 0.72rem; font-weight: 600; color: #898781; text-transform: uppercase;
-    padding: 4px 2px; text-align: left; border-bottom: 1px solid #e1e0d9;
+.agenda-wrap {
+    max-height: 72vh; overflow-y: auto; border: 1px solid #e1e0d9; border-radius: 8px;
+    padding: 0 18px 18px 18px; background: #fcfcfb;
 }
-.cal-day {
-    vertical-align: top; border: 1px solid #e1e0d9; height: 92px; width: 14.28%;
-    padding: 3px; overflow: hidden;
+.agenda-day { padding-top: 4px; border-bottom: 1px solid #e1e0d9; }
+.agenda-day:last-child { border-bottom: none; }
+.agenda-day-header {
+    position: sticky; top: 0; background: #fcfcfb; padding: 10px 0 6px 0;
+    font-size: 1.1rem; font-weight: 700; color: #0b0b0b; z-index: 1;
 }
-.cal-day-outside { background: #f9f9f7; }
-.cal-day-outside .cal-day-num { color: #c3c2b7; }
-.cal-day-today { background: #f0f6ff; }
-.cal-day-num { font-size: 0.78rem; color: #52514e; margin-bottom: 2px; }
-.cal-chip {
-    border-left: 3px solid; padding: 1px 4px; margin-bottom: 2px; border-radius: 2px;
-    background: #fcfcfb; font-size: 0.68rem; line-height: 1.25; cursor: default;
+.agenda-day-header-today { color: #2a78d6; }
+.agenda-empty { color: #898781; font-style: italic; font-size: 0.85rem; padding: 0 0 14px 0; }
+.agenda-event {
+    border-left: 4px solid; border-radius: 6px; padding: 10px 14px; margin: 0 0 12px 0;
+    background: #f9f9f7;
 }
-.cal-chip-time { color: #52514e; font-weight: 600; }
-.cal-chip-tech { font-weight: 600; }
-.cal-chip-title { color: #0b0b0b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cal-more { font-size: 0.66rem; color: #898781; padding-left: 4px; }
-.cal-legend { margin-top: 10px; font-size: 0.8rem; }
-.cal-legend-item { display: inline-flex; align-items: center; gap: 5px; margin-right: 14px; }
-.cal-legend-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.agenda-event-top { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; flex-wrap: wrap; }
+.agenda-event-time { font-weight: 700; font-size: 0.95rem; color: #52514e; }
+.agenda-event-tech {
+    color: #ffffff; font-size: 0.78rem; font-weight: 700; padding: 3px 10px; border-radius: 10px;
+}
+.agenda-event-title { font-size: 1.05rem; color: #0b0b0b; line-height: 1.4; }
+.cal-legend { margin-top: 10px; margin-bottom: 12px; font-size: 0.85rem; }
+.cal-legend-item { display: inline-flex; align-items: center; gap: 5px; margin-right: 16px; }
+.cal-legend-swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
 @media (prefers-color-scheme: dark) {
-    .cal-month-title { color: #ffffff; }
-    .cal-grid th { color: #c3c2b7; border-bottom-color: #2c2c2a; }
-    .cal-day { border-color: #2c2c2a; }
-    .cal-day-outside { background: #0d0d0d; }
-    .cal-day-outside .cal-day-num { color: #383835; }
-    .cal-day-today { background: #16202c; }
-    .cal-day-num { color: #c3c2b7; }
-    .cal-chip { background: #1a1a19; }
-    .cal-chip-time { color: #c3c2b7; }
-    .cal-chip-title { color: #ffffff; }
+    .agenda-wrap { border-color: #2c2c2a; background: #1a1a19; }
+    .agenda-day { border-bottom-color: #2c2c2a; }
+    .agenda-day-header { background: #1a1a19; color: #ffffff; }
+    .agenda-day-header-today { color: #3987e5; }
+    .agenda-event { background: #0d0d0d; }
+    .agenda-event-time { color: #c3c2b7; }
+    .agenda-event-title { color: #ffffff; }
 }
 </style>
 """
@@ -161,20 +151,14 @@ _CALENDAR_CSS = """
 
 def _render_calendar_view(service: DashboardService) -> None:
     st.subheader("📅 Schedule")
-    st.caption("From Zoho CRM's Calendar - this month and next")
+    st.caption("From Zoho CRM's Calendar - this month and next, one row per day, scroll for more")
 
     today = dt.date.today()
     month1_year, month1 = today.year, today.month
     month2_year, month2 = (today.year, today.month + 1) if today.month < 12 else (today.year + 1, 1)
 
-    # Fetch across the full span both grids actually display, including
-    # the leading/trailing days from neighboring months each grid pads
-    # its first/last week with - otherwise those padding cells would
-    # always show empty even when Zoho has an event on that exact date.
-    weeks1 = calendar.Calendar(firstweekday=6).monthdatescalendar(month1_year, month1)
-    weeks2 = calendar.Calendar(firstweekday=6).monthdatescalendar(month2_year, month2)
-    range_start = weeks1[0][0]
-    range_end = weeks2[-1][-1]
+    range_start = dt.date(month1_year, month1, 1)
+    range_end = _last_day_of_month(month2_year, month2)
 
     schedule = service.get_calendar_range(range_start, range_end)
 
@@ -189,15 +173,6 @@ def _render_calendar_view(service: DashboardService) -> None:
     for event in events:
         events_by_day.setdefault(event["start"].date(), []).append(event)
 
-    grid_html = (
-        _CALENDAR_CSS
-        + '<div class="cal-wrap">'
-        + _month_grid_html(month1_year, month1, events_by_day, tech_colors)
-        + _month_grid_html(month2_year, month2, events_by_day, tech_colors)
-        + "</div>"
-    )
-    st.markdown(grid_html, unsafe_allow_html=True)
-
     if tech_colors:
         legend_items = "".join(
             f'<span class="cal-legend-item"><span class="cal-legend-swatch" '
@@ -208,11 +183,9 @@ def _render_calendar_view(service: DashboardService) -> None:
             _CALENDAR_CSS + f'<div class="cal-legend">{legend_items}</div>',
             unsafe_allow_html=True,
         )
-        st.caption(
-            "Tech names are Zoho's Owner field on each event - not yet confirmed this is "
-            "the assigned tech rather than whoever created the entry. Let me know if these "
-            "look wrong and I'll switch it to a different field."
-        )
+
+    agenda_html = _day_by_day_html(range_start, range_end, events_by_day, tech_colors)
+    st.markdown(_CALENDAR_CSS + agenda_html, unsafe_allow_html=True)
 
     if not events and not schedule["error"]:
         st.info("Nothing on the calendar in either month.")
