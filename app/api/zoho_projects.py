@@ -87,7 +87,21 @@ class ZohoClient:
                     f"Request to {url} failed: {resp.status_code} {resp.reason} - {body}"
                 )
 
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError as exc:
+                # A 2xx status doesn't guarantee a JSON body - an empty or
+                # non-JSON response here used to crash the whole page with
+                # a raw traceback instead of degrading gracefully. Wrap it
+                # like every other failure so callers can fall back.
+                body = (resp.text or "")[:500]
+                logger.error(
+                    "Zoho API response from %s was not valid JSON (status %s): %s - body: %s",
+                    url, resp.status_code, exc, body,
+                )
+                raise ZohoAPIError(
+                    f"Response from {url} was not valid JSON (status {resp.status_code}): {body}"
+                ) from exc
 
     # ---------------- Zoho Projects ----------------
 
