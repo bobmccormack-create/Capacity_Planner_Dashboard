@@ -55,21 +55,26 @@ class DashboardService:
 
     @staticmethod
     def _fallback_kpis(error: str) -> dict:
+        # Read last.projects/tasks/etc. *inside* the session block, not
+        # after it - get_session() commits and closes on exit, and
+        # SQLAlchemy expires an object's attributes on commit, so touching
+        # them once the session has closed raises DetachedInstanceError
+        # instead of gracefully falling back.
         with get_session() as session:
             last = (
                 session.query(KpiSnapshot)
                 .order_by(KpiSnapshot.captured_at.desc())
                 .first()
             )
-        if last:
-            return {
-                "projects": last.projects,
-                "tasks": last.tasks,
-                "cases": last.cases,
-                "users": last.users,
-                "source": "cache",
-                "error": error,
-            }
+            if last:
+                return {
+                    "projects": last.projects,
+                    "tasks": last.tasks,
+                    "cases": last.cases,
+                    "users": last.users,
+                    "source": "cache",
+                    "error": error,
+                }
         return {
             "projects": 0, "tasks": 0, "cases": 0, "users": 0,
             "source": "cache", "error": error,
