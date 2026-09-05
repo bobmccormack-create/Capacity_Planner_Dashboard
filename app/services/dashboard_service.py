@@ -22,7 +22,16 @@ Users) doesn't re-run on every single rerun - including things like the
 password screen or just reloading the tab. _fetch_kpis_cached is shared
 across the whole app (all viewers, not just one session) and only
 actually re-hits Zoho once every CACHE_TTL_SECONDS.
+
+Upcoming schedule: get_upcoming_events() layers on top of
+zoho_client.get_calendar_events() to answer "what's on the calendar in
+the next N days", rather than the raw event dump that method returns.
+Unlike the KPI numbers, a calendar widget failing to load isn't worth
+treating as seriously - it degrades to "couldn't load the schedule right
+now" instead of falling back to a stale cached snapshot.
 """
+import datetime as dt
+
 import streamlit as st
 
 from app.api.zoho_projects import zoho_client, ZohoAPIError
@@ -44,6 +53,18 @@ class DashboardService:
                    "source": "zoho" | "cache", "error": str | None}
         """
         return _fetch_kpis_cached()
+
+    def get_upcoming_events(self, days_ahead: int = 14) -> dict:
+        """
+        Returns: {"events": [ {..raw Zoho event fields.., "start": datetime,
+                   "end": datetime} ], "error": str | None}
+
+        "events" is sorted soonest-first and filtered to events that
+        haven't fully ended yet and start within `days_ahead` days from
+        now - i.e. "what's coming up", not the full history of every
+        calendar entry ever created.
+        """
+        return _fetch_upcoming_events_cached(days_ahead)
 
     @staticmethod
     def _save_snapshot(kpis: dict) -> None:
@@ -113,3 +134,50 @@ def _fetch_kpis_cached() -> dict:
     except ZohoAPIError as exc:
         logger.warning("Live Zoho fetch failed, falling back to cache: %s", exc)
         return DashboardService._fallback_kpis(error=str(exc))
+
+
+def _parse_zoho_datetime(value: str):
+    """
+    Zoho returns datetimes like "2026-09-10T09:00:00-07:00". datetime.
+    fromisoformat handles that offset form directly (no external date
+    library needed) - returns None instead of raising if a record has a
+    missing/malformed value, so one bad record can't take down the whole
+    widget.
+    """
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value)
+    except ValueError:
+        logger.warning("Could not parse calendar event datetime: %r", value)
+        return None
+
+
+@st.cache_data(ttl=settings.CACHE_TTL_SECONDS, show_spinner="Fetching calendar...")
+def _fetch_upcoming_events_cached(days_ahead: int) -> dict:
+    try:
+        raw_events = zoho_client.get_calendar_events()
+    except ZohoAPIError as exc:
+        logger.warning("Calendar fetch failed: %s", exc)
+        return {"events": [], "error": str(exc)}
+
+    now = dt.datetime.now(dt.timezone.utc)
+    window_end = now + dt.timedelta(days=days_ahead)
+
+    upcoming = []
+    for event in raw_events:
+        start = _parse_zoho_datetime(event.get("Start_DateTime"))
+        end = _parse_zoho_datetime(event.get("End_DateTime")) or start
+        if start is None:
+            continue
+        # Keep anything still in progress or starting before the window
+        # closes - drop events that already fully ended, and ones too far
+        # out to be "upcoming" yet.
+        if end is not None and end < now:
+            continue
+        if start > window_end:
+            continue
+        upcoming.append({**event, "start": start, "end": end})
+
+    upcoming.sort(key=lambda e: e["start"])
+    return {"events": upcoming, "error": None}

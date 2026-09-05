@@ -42,6 +42,14 @@ class Settings:
     # --- Zoho CRM ---
     ZOHO_CRM_ORG_ID = os.getenv("ZOHO_CRM_ORG_ID", "")
 
+    # --- QuickBooks Time (T-Sheets) ---
+    # A single long-lived access token, not a client_id/secret/refresh_token
+    # OAuth setup - see tsheets_auth.py for why. Generate one from inside
+    # QuickBooks Time itself: Feature Add-ons -> API -> Add a new
+    # application - and extend its expiration from that same page rather
+    # than dealing with token refresh.
+    TSHEETS_ACCESS_TOKEN = os.getenv("TSHEETS_ACCESS_TOKEN", "")
+
     # --- Database (local cache) ---
     DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///capacity_planner.db")
 
@@ -72,6 +80,10 @@ class Settings:
         return bool(
             cls.ZOHO_CLIENT_ID and cls.ZOHO_CLIENT_SECRET and cls.ZOHO_REFRESH_TOKEN
         )
+
+    @classmethod
+    def has_tsheets_credentials(cls) -> bool:
+        return bool(cls.TSHEETS_ACCESS_TOKEN)
 
 
 settings = Settings()

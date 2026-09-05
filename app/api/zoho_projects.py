@@ -234,9 +234,19 @@ class ZohoClient:
 
         Zoho's v6 Events endpoint only allows sorting by id, Created_Time
         or Modified_Time server-side (confirmed live - it 400s on anything
-        else, including the obvious Start_DateTime) - so we don't ask it
-        to sort at all, and instead sort by Start_DateTime ourselves once
-        the records are back.
+        else, including the obvious Start_DateTime), so we ask it to sort
+        by Modified_Time descending rather than leaving sort_by out
+        entirely. Zoho's own docs say the *default* order (no sort_by at
+        all) is by id ascending - oldest-created record first. For a
+        calendar that's been in use a while, a plain per_page=200 fetch
+        with no sort_by would silently return the OLDEST 200 events ever
+        created, not the ones relevant to "what's coming up" - the same
+        kind of silent-cap bug get_projects() had before its pagination
+        fix. Sorting by Modified_Time descending means "most recently
+        touched" events come back first, which for an actively-used
+        schedule is a much better proxy for "current/upcoming" than
+        insertion order. We still re-sort the returned page by
+        Start_DateTime client-side afterward, for display order.
         """
         url = f"{settings.zoho_crm_base()}/crm/v6/Events"
         data = self._get(
@@ -244,6 +254,8 @@ class ZohoClient:
             params={
                 "fields": "Event_Title,Start_DateTime,End_DateTime,Owner,Who_Id,What_Id,Description",
                 "per_page": per_page,
+                "sort_by": "Modified_Time",
+                "sort_order": "desc",
             },
         )
         events = data.get("data", [])
