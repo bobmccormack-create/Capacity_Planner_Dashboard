@@ -1,6 +1,7 @@
 import streamlit as st
 
 from app.services.dashboard_service import DashboardService
+from app.utils.auth import check_password
 
 
 def render():
@@ -54,4 +55,7 @@ if __name__ == "__main__":
         page_icon="🏠",
         layout="wide",
     )
-    render()
+    if check_password():
+        render()
+    else:
+        st.stop()

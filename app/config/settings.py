@@ -49,6 +49,12 @@ class Settings:
     CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "300"))
     REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "15"))
 
+    # --- Access control ---
+    # Shared password the whole team uses to view the dashboard. Leave blank
+    # (the default) to disable the password screen entirely - useful for
+    # local development so you're not prompted every time you run it.
+    APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+
     @classmethod
     def zoho_accounts_base(cls) -> str:
         return f"https://accounts.zoho.{cls.ZOHO_REGION}"
