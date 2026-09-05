@@ -74,11 +74,18 @@ class ZohoClient:
                 attempt += 1
                 continue
 
-            try:
-                resp.raise_for_status()
-            except requests.RequestException as exc:
-                logger.error("Zoho API request to %s failed: %s", url, exc)
-                raise ZohoAPIError(f"Request to {url} failed: {exc}") from exc
+            if resp.status_code >= 400:
+                # raise_for_status() alone only gives "400 Client Error: "
+                # with no explanation - Zoho puts the actual reason in the
+                # response body, so grab that too or we're debugging blind.
+                body = (resp.text or "")[:500]
+                logger.error(
+                    "Zoho API request to %s failed: %s %s - body: %s",
+                    url, resp.status_code, resp.reason, body,
+                )
+                raise ZohoAPIError(
+                    f"Request to {url} failed: {resp.status_code} {resp.reason} - {body}"
+                )
 
             return resp.json()
 
@@ -125,19 +132,22 @@ class ZohoClient:
             time.sleep(_TASK_LOOP_DELAY_SECONDS)
 
         if attempted and failed == attempted:
-            # Every single project failed - almost certainly rate-limited
-            # (or an auth/portal problem hitting every request the same
-            # way). Raise instead of returning [] so the caller's
-            # fallback-to-last-cache path kicks in rather than the
-            # dashboard showing a false zero.
+            # Every single project failed the same way - could be rate
+            # limiting, but could just as easily be an API/auth/portal
+            # problem hitting every request identically (the per-project
+            # log lines above carry Zoho's actual error body - check
+            # those rather than assuming rate limiting). Raise instead of
+            # returning [] so the caller's fallback-to-last-cache path
+            # kicks in rather than the dashboard showing a false zero.
             raise ZohoAPIError(
-                f"All {attempted} project task requests failed "
-                "(likely rate-limited) - refusing to report 0 tasks."
+                f"All {attempted} project task requests failed - "
+                "refusing to report 0 tasks. See logs for the underlying "
+                "Zoho error."
             )
         if failed:
             logger.warning(
-                "Task aggregation: %s/%s projects failed to return tasks "
-                "(rate limit or transient error) - partial count returned.",
+                "Task aggregation: %s/%s projects failed to return tasks - "
+                "partial count returned.",
                 failed, attempted,
             )
         return all_tasks
