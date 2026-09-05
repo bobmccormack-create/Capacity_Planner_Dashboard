@@ -6,8 +6,22 @@ already importing but that didn't exist yet.
 Design choice: if Zoho is unreachable or unconfigured, we don't crash the
 page - we fall back to the last cached snapshot (or zeros) and flag it, so
 the dashboard degrades gracefully instead of throwing a stack trace.
+
+Caching: fetching "tasks" means one Zoho API call per project when no
+single ZOHO_PROJECTS_PROJECT_ID is configured (this app intentionally
+aggregates across every project), so a full page load can mean dozens or
+hundreds of API calls. Without caching, that refetch happened on every
+single rerun - including things like the password screen or just
+reloading the tab - which risks tripping Zoho's rate limits and silently
+zeroing out counts (failed per-project calls are skipped, not raised).
+_fetch_kpis_cached is shared across the whole app (all viewers, not just
+one session) and only actually re-hits Zoho once every
+CACHE_TTL_SECONDS.
 """
+import streamlit as st
+
 from app.api.zoho_projects import zoho_client, ZohoAPIError
+from app.config.settings import settings
 from app.database.database import get_session, init_db
 from app.database.models import KpiSnapshot
 from app.utils.logger import get_logger
@@ -24,28 +38,10 @@ class DashboardService:
         Returns: {"projects": int, "tasks": int, "cases": int, "users": int,
                    "source": "zoho" | "cache", "error": str | None}
         """
-        try:
-            projects = zoho_client.get_projects()
-            tasks = zoho_client.get_tasks()
-            cases = zoho_client.get_cases()
-            users = zoho_client.get_crm_users()
+        return _fetch_kpis_cached()
 
-            kpis = {
-                "projects": len(projects),
-                "tasks": len(tasks),
-                "cases": len(cases),
-                "users": len(users),
-                "source": "zoho",
-                "error": None,
-            }
-            self._save_snapshot(kpis)
-            return kpis
-
-        except ZohoAPIError as exc:
-            logger.warning("Live Zoho fetch failed, falling back to cache: %s", exc)
-            return self._fallback_kpis(error=str(exc))
-
-    def _save_snapshot(self, kpis: dict) -> None:
+    @staticmethod
+    def _save_snapshot(kpis: dict) -> None:
         with get_session() as session:
             session.add(
                 KpiSnapshot(
@@ -57,7 +53,8 @@ class DashboardService:
                 )
             )
 
-    def _fallback_kpis(self, error: str) -> dict:
+    @staticmethod
+    def _fallback_kpis(error: str) -> dict:
         with get_session() as session:
             last = (
                 session.query(KpiSnapshot)
@@ -77,3 +74,27 @@ class DashboardService:
             "projects": 0, "tasks": 0, "cases": 0, "users": 0,
             "source": "cache", "error": error,
         }
+
+
+@st.cache_data(ttl=settings.CACHE_TTL_SECONDS, show_spinner="Fetching latest data from Zoho...")
+def _fetch_kpis_cached() -> dict:
+    try:
+        projects = zoho_client.get_projects()
+        tasks = zoho_client.get_tasks()
+        cases = zoho_client.get_cases()
+        users = zoho_client.get_crm_users()
+
+        kpis = {
+            "projects": len(projects),
+            "tasks": len(tasks),
+            "cases": len(cases),
+            "users": len(users),
+            "source": "zoho",
+            "error": None,
+        }
+        DashboardService._save_snapshot(kpis)
+        return kpis
+
+    except ZohoAPIError as exc:
+        logger.warning("Live Zoho fetch failed, falling back to cache: %s", exc)
+        return DashboardService._fallback_kpis(error=str(exc))
