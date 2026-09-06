@@ -207,6 +207,33 @@ def _fetch_upcoming_events_cached(days_ahead: int) -> dict:
     return {"events": upcoming, "error": None}
 
 
+# Techs/owners whose calendar entries should never show up on the
+# schedule (overview grid, day-by-day list, or the tech-color legend) -
+# former employees, subcontractors who've moved on, etc. Requested
+# 2026-09-06. Matched case-insensitively and trimmed, since Zoho's Owner
+# name formatting isn't guaranteed byte-for-byte consistent.
+_EXCLUDED_TECH_NAMES = {
+    name.strip().lower()
+    for name in [
+        "Johnathon Crowley",
+        "Izaac Kines",
+        "Jacob Thomas",
+        "Jennifer McKenzie",
+        "Tim Fay",
+        "Andrew Pinedo",
+        "Rich Pereira",
+        "Jeremy McKenzie",
+        "Christian Van Horn",
+        "Casey Webster",
+        "Steven Gin",
+    ]
+}
+
+
+def _is_excluded_tech(tech_name: str) -> bool:
+    return tech_name.strip().lower() in _EXCLUDED_TECH_NAMES
+
+
 def _extract_tech_name(event: dict) -> str:
     """
     Best guess at "who's assigned" - the Zoho Events "Owner" field, a
@@ -260,11 +287,16 @@ def _fetch_calendar_range_cached(start_date: dt.date, end_date: dt.date) -> dict
         event_end_date = (end or start).date()
         if event_end_date < start_date or event_start_date > end_date:
             continue
+
+        tech_name = _extract_tech_name(event)
+        if _is_excluded_tech(tech_name):
+            continue
+
         in_range.append({
             **event,
             "start": start,
             "end": end,
-            "tech_name": _extract_tech_name(event),
+            "tech_name": tech_name,
             "participant_names": _extract_participant_names(event),
         })
 

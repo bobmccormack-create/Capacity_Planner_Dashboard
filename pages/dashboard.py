@@ -58,73 +58,99 @@ def _last_day_of_month(year: int, month: int) -> dt.date:
     return dt.date(year, month, calendar.monthrange(year, month)[1])
 
 
-def _day_by_day_html(range_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict) -> str:
+def _event_card_html(event: dict, tech_colors: dict) -> str:
     """
-    One row per calendar day (including empty ones, shown minimally, so a
-    light day still reads as "nothing scheduled" rather than just
-    vanishing from the list) inside a single scrollable panel - the
-    "blown up, scrollable, day by day" view, as opposed to the cramped
-    small-cell month grid this replaces. Every event is shown in full,
-    nothing truncated with a "+N more".
+    The visual "card" for one event in the detailed day-by-day list: time,
+    a colored tech-name pill, and the full (untruncated) title. Pure
+    display - the click target that opens the details modal is a separate,
+    real Streamlit button rendered alongside this (raw injected HTML can't
+    carry a Streamlit click handler), so this only needs to return markup,
+    never wire up interactivity itself.
     """
+    title = html_lib.escape(event.get("Event_Title") or "(untitled event)")
+    tech_name = event.get("tech_name") or "Unassigned"
+    tech = html_lib.escape(tech_name)
+    color = tech_colors.get(tech_name, _OVERFLOW_COLOR)
+    time_str = html_lib.escape(_format_time(event["start"]))
+    if event.get("end") and event["end"] != event["start"]:
+        time_str += f" – {html_lib.escape(_format_time(event['end']))}"
+    return (
+        f'<div class="agenda-event" style="border-left-color:{color}">'
+        f'<div class="agenda-event-top">'
+        f'<span class="agenda-event-time">{time_str}</span>'
+        f'<span class="agenda-event-tech" style="background:{color}">{tech}</span>'
+        f"</div>"
+        f'<div class="agenda-event-title">{title}</div>'
+        f"</div>"
+    )
+
+
+def _overview_month_grid_html(year: int, month: int, events_by_day: dict, tech_colors: dict) -> str:
+    """
+    A compact, classic month grid (weeks starting Sunday) - the "see
+    everything at a glance" companion to the detailed day-by-day list
+    below it. Each day shows up to 3 tiny colored chips (one per event,
+    hover for a quick peek at time/title/tech) and a "+N more" note
+    beyond that - unlike the detailed list, this view is meant to be
+    skimmed, not read event-by-event, so some truncation here is fine.
+    """
+    cal = calendar.Calendar(firstweekday=6)
+    weeks = cal.monthdatescalendar(year, month)
     today = dt.date.today()
-    parts = ['<div class="agenda-wrap">']
+    month_label = f"{calendar.month_name[month]} {year}"
 
-    current = range_start
-    while current <= range_end:
-        is_today = current == today
-        day_label = f"{current.strftime('%A, %B')} {current.day}"
-        if is_today:
-            day_label += " — Today"
-        header_class = "agenda-day-header" + (" agenda-day-header-today" if is_today else "")
-        parts.append(
-            f'<div class="agenda-day"><div class="{header_class}">'
-            f"{html_lib.escape(day_label)}</div>"
-        )
+    parts = [f'<div class="ov-month"><div class="ov-month-title">{html_lib.escape(month_label)}</div>']
+    parts.append('<table class="ov-grid"><thead><tr>')
+    for wd in ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"):
+        parts.append(f"<th>{wd}</th>")
+    parts.append("</tr></thead><tbody>")
 
-        day_events = events_by_day.get(current, [])
-        if not day_events:
-            parts.append('<div class="agenda-empty">No jobs scheduled</div>')
-        else:
-            for event in day_events:
-                title = html_lib.escape(event.get("Event_Title") or "(untitled event)")
-                tech = html_lib.escape(event.get("tech_name") or "Unassigned")
-                color = tech_colors.get(event.get("tech_name") or "Unassigned", _OVERFLOW_COLOR)
-                time_str = html_lib.escape(_format_time(event["start"]))
-                if event.get("end") and event["end"] != event["start"]:
-                    time_str += f" – {html_lib.escape(_format_time(event['end']))}"
-                parts.append(
-                    f'<div class="agenda-event" style="border-left-color:{color}">'
-                    f'<div class="agenda-event-top">'
-                    f'<span class="agenda-event-time">{time_str}</span>'
-                    f'<span class="agenda-event-tech" style="background:{color}">{tech}</span>'
-                    f"</div>"
-                    f'<div class="agenda-event-title">{title}</div>'
-                    f"</div>"
+    max_chips = 3
+    for week in weeks:
+        parts.append("<tr>")
+        for day in week:
+            in_month = day.month == month
+            cell_classes = "ov-day"
+            if not in_month:
+                cell_classes += " ov-day-outside"
+            if day == today:
+                cell_classes += " ov-day-today"
+
+            day_events = events_by_day.get(day, [])
+            chip_html = ""
+            for event in day_events[:max_chips]:
+                tech_name = event.get("tech_name") or "Unassigned"
+                color = tech_colors.get(tech_name, _OVERFLOW_COLOR)
+                title = event.get("Event_Title") or "(untitled event)"
+                tooltip = html_lib.escape(f"{_format_time(event['start'])} – {title} ({tech_name})")
+                chip_html += (
+                    f'<div class="ov-chip" style="background:{color}" title="{tooltip}">'
+                    f"{html_lib.escape(title)}</div>"
                 )
-        parts.append("</div>")
-        current += dt.timedelta(days=1)
+            overflow = len(day_events) - max_chips
+            if overflow > 0:
+                chip_html += f'<div class="ov-more">+{overflow} more</div>'
 
-    parts.append("</div>")
+            day_num = str(day.day) if in_month else ""
+            parts.append(
+                f'<td class="{cell_classes}"><div class="ov-daynum">{day_num}</div>{chip_html}</td>'
+            )
+        parts.append("</tr>")
+    parts.append("</tbody></table></div>")
     return "".join(parts)
 
 
 _CALENDAR_CSS = """
 <style>
-.agenda-wrap {
-    max-height: 72vh; overflow-y: auto; border: 1px solid #e1e0d9; border-radius: 8px;
-    padding: 0 18px 18px 18px; background: #fcfcfb;
-}
-.agenda-day { padding-top: 4px; border-bottom: 1px solid #e1e0d9; }
-.agenda-day:last-child { border-bottom: none; }
 .agenda-day-header {
     position: sticky; top: 0; background: #fcfcfb; padding: 10px 0 6px 0;
+    margin-top: 14px; border-top: 1px solid #e1e0d9;
     font-size: 1.1rem; font-weight: 700; color: #0b0b0b; z-index: 1;
 }
 .agenda-day-header-today { color: #2a78d6; }
 .agenda-empty { color: #898781; font-style: italic; font-size: 0.85rem; padding: 0 0 14px 0; }
 .agenda-event {
-    border-left: 4px solid; border-radius: 6px; padding: 10px 14px; margin: 0 0 12px 0;
+    border-left: 4px solid; border-radius: 6px; padding: 10px 14px; margin: 6px 0 8px 0;
     background: #f9f9f7;
 }
 .agenda-event-top { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; flex-wrap: wrap; }
@@ -136,22 +162,158 @@ _CALENDAR_CSS = """
 .cal-legend { margin-top: 10px; margin-bottom: 12px; font-size: 0.85rem; }
 .cal-legend-item { display: inline-flex; align-items: center; gap: 5px; margin-right: 16px; }
 .cal-legend-swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+.ov-month { margin-bottom: 10px; }
+.ov-month-title { font-weight: 700; font-size: 1rem; margin-bottom: 6px; color: #0b0b0b; }
+.ov-grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.ov-grid th {
+    font-size: 0.72rem; font-weight: 700; color: #898781; padding: 4px 2px; text-align: left;
+}
+.ov-day {
+    vertical-align: top; border: 1px solid #e1e0d9; padding: 4px; height: 78px; width: 14.28%;
+    overflow: hidden;
+}
+.ov-day-outside { background: #f9f9f7; }
+.ov-day-outside .ov-daynum { color: #c3c2b7; }
+.ov-day-today { background: #eaf2fd; border-color: #2a78d6; }
+.ov-daynum { font-size: 0.78rem; font-weight: 700; color: #52514e; margin-bottom: 2px; }
+.ov-chip {
+    color: #ffffff; font-size: 0.66rem; font-weight: 600; padding: 1px 4px; border-radius: 3px;
+    margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ov-more { font-size: 0.65rem; color: #898781; font-style: italic; }
 @media (prefers-color-scheme: dark) {
-    .agenda-wrap { border-color: #2c2c2a; background: #1a1a19; }
-    .agenda-day { border-bottom-color: #2c2c2a; }
-    .agenda-day-header { background: #1a1a19; color: #ffffff; }
+    .agenda-day-header { background: #1a1a19; color: #ffffff; border-top-color: #2c2c2a; }
     .agenda-day-header-today { color: #3987e5; }
     .agenda-event { background: #0d0d0d; }
     .agenda-event-time { color: #c3c2b7; }
     .agenda-event-title { color: #ffffff; }
+    .ov-month-title { color: #ffffff; }
+    .ov-day { border-color: #2c2c2a; }
+    .ov-day-outside { background: #0d0d0d; }
+    .ov-day-today { background: #16283f; border-color: #3987e5; }
+    .ov-daynum { color: #c3c2b7; }
 }
 </style>
 """
 
 
+@st.dialog("Event Details")
+def _show_event_dialog(event: dict) -> None:
+    """
+    Full info for one calendar event, opened by clicking its "Details"
+    button in the day-by-day list. Uses st.write/st.markdown (never
+    unsafe_allow_html) throughout, so nothing in Zoho's data - a title,
+    description, or contact name someone typed into the CRM - can inject
+    raw HTML here.
+    """
+    title = event.get("Event_Title") or "(untitled event)"
+    st.subheader(title)
+
+    tech_name = event.get("tech_name") or "Unassigned"
+    st.write(f"**Tech:** {tech_name}")
+
+    start = event["start"]
+    date_str = f"{start.strftime('%A, %B')} {start.day}, {start.year}"
+    time_str = _format_time(start)
+    if event.get("end") and event["end"] != start:
+        time_str += f" – {_format_time(event['end'])}"
+    st.write(f"**When:** {date_str}, {time_str}")
+
+    who = event.get("Who_Id")
+    if isinstance(who, dict) and who.get("name"):
+        st.write(f"**Related contact:** {who['name']}")
+
+    what = event.get("What_Id")
+    if isinstance(what, dict) and what.get("name"):
+        st.write(f"**Related to:** {what['name']}")
+
+    participants = event.get("participant_names") or []
+    if participants:
+        st.write(f"**Participants:** {', '.join(participants)}")
+
+    description = event.get("Description")
+    if description:
+        st.write("**Notes:**")
+        st.write(description)
+
+
+def _render_overview(range_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict) -> None:
+    """
+    The "see everything at a glance" companion view: a compact 2-month
+    grid, month1 and month2 side by side. Not clickable (unlike the
+    detailed list below) - it's meant for skimming volume and spotting
+    busy days, with a hover tooltip for a quick peek; open the day-by-day
+    list underneath for full details on any specific job.
+    """
+    st.markdown("###### Two-Month Overview")
+    col1, col2 = st.columns(2)
+    months_seen = []
+    current = dt.date(range_start.year, range_start.month, 1)
+    while current <= range_end and len(months_seen) < 2:
+        months_seen.append((current.year, current.month))
+        current = (
+            dt.date(current.year + 1, 1, 1)
+            if current.month == 12
+            else dt.date(current.year, current.month + 1, 1)
+        )
+
+    for col, (year, month) in zip((col1, col2), months_seen):
+        with col:
+            st.markdown(
+                _overview_month_grid_html(year, month, events_by_day, tech_colors),
+                unsafe_allow_html=True,
+            )
+
+
+def _render_day_by_day(display_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict) -> None:
+    """
+    One row per calendar day (including empty ones) inside a scrollable
+    panel - the "blown up, scrollable, day by day" detail view. Every
+    event is shown in full, nothing truncated with a "+N more", and each
+    has its own small "Details" button that opens the full-info modal
+    (_show_event_dialog) - raw HTML injected via st.markdown can't carry a
+    real click handler, so each event card is paired with an actual
+    Streamlit button rather than being clickable itself.
+
+    display_start (not necessarily the whole range's start) is where the
+    list begins - the "jump to date" picker in _render_calendar_view lets
+    someone skip straight to a date instead of scrolling day by day from
+    the top, by re-rendering the list starting there.
+    """
+    today = dt.date.today()
+
+    with st.container(height=700):
+        current = display_start
+        while current <= range_end:
+            is_today = current == today
+            day_label = f"{current.strftime('%A, %B')} {current.day}"
+            if is_today:
+                day_label += " — Today"
+            header_class = "agenda-day-header" + (" agenda-day-header-today" if is_today else "")
+            st.markdown(
+                f'<div class="{header_class}">{html_lib.escape(day_label)}</div>',
+                unsafe_allow_html=True,
+            )
+
+            day_events = events_by_day.get(current, [])
+            if not day_events:
+                st.markdown('<div class="agenda-empty">No jobs scheduled</div>', unsafe_allow_html=True)
+            else:
+                for idx, event in enumerate(day_events):
+                    card_col, btn_col = st.columns([8, 1], vertical_alignment="center")
+                    with card_col:
+                        st.markdown(_event_card_html(event, tech_colors), unsafe_allow_html=True)
+                    with btn_col:
+                        button_key = f"ev_{current.isoformat()}_{idx}_{event.get('id') or ''}"
+                        if st.button("🔍", key=button_key, help="View details", use_container_width=True):
+                            _show_event_dialog(event)
+
+            current += dt.timedelta(days=1)
+
+
 def _render_calendar_view(service: DashboardService) -> None:
     st.subheader("📅 Schedule")
-    st.caption("From Zoho CRM's Calendar - this month and next, one row per day, scroll for more")
+    st.caption("From Zoho CRM's Calendar - this month and next")
 
     today = dt.date.today()
     month1_year, month1 = today.year, today.month
@@ -173,19 +335,52 @@ def _render_calendar_view(service: DashboardService) -> None:
     for event in events:
         events_by_day.setdefault(event["start"].date(), []).append(event)
 
+    st.markdown(_CALENDAR_CSS, unsafe_allow_html=True)
+
     if tech_colors:
         legend_items = "".join(
             f'<span class="cal-legend-item"><span class="cal-legend-swatch" '
             f'style="background:{color}"></span>{html_lib.escape(name)}</span>'
             for name, color in tech_colors.items()
         )
-        st.markdown(
-            _CALENDAR_CSS + f'<div class="cal-legend">{legend_items}</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f'<div class="cal-legend">{legend_items}</div>', unsafe_allow_html=True)
 
-    agenda_html = _day_by_day_html(range_start, range_end, events_by_day, tech_colors)
-    st.markdown(_CALENDAR_CSS + agenda_html, unsafe_allow_html=True)
+    _render_overview(range_start, range_end, events_by_day, tech_colors)
+
+    st.markdown("###### Day-by-Day Detail")
+    default_date = today if range_start <= today <= range_end else range_start
+
+    # A "Reset to today" click has to update calendar_jump_date *before*
+    # the date_input widget below is instantiated this run - Streamlit
+    # raises if session_state for a widget's key is written after that
+    # widget has already been created in the same script run. So the
+    # button just sets a plain flag and reruns; this block, which runs
+    # before the widget exists yet, is what actually applies the reset.
+    if st.session_state.pop("_reset_calendar_jump", False):
+        st.session_state["calendar_jump_date"] = default_date
+    # Passing both `value=` and touching session_state for the same
+    # widget key logs a Streamlit warning even when they agree - so the
+    # initial default is seeded into session_state once here instead of
+    # passed as `value=` below, and every later run is driven purely by
+    # session_state (the widget's own persistence, or the reset above).
+    if "calendar_jump_date" not in st.session_state:
+        st.session_state["calendar_jump_date"] = default_date
+
+    jump_col, reset_col = st.columns([3, 1], vertical_alignment="bottom")
+    with jump_col:
+        display_start = st.date_input(
+            "Jump to date",
+            min_value=range_start,
+            max_value=range_end,
+            key="calendar_jump_date",
+        )
+    with reset_col:
+        if st.button("Reset to today", use_container_width=True):
+            st.session_state["_reset_calendar_jump"] = True
+            st.rerun()
+
+    st.caption("Scroll for more - click 🔍 on any job to see its full details")
+    _render_day_by_day(display_start, range_end, events_by_day, tech_colors)
 
     if not events and not schedule["error"]:
         st.info("Nothing on the calendar in either month.")
