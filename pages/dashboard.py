@@ -58,6 +58,30 @@ def _last_day_of_month(year: int, month: int) -> dt.date:
     return dt.date(year, month, calendar.monthrange(year, month)[1])
 
 
+def _event_time_label(event: dict) -> str:
+    """
+    'All day' (plus the date span, if it runs more than one day) for an
+    all-day job, otherwise the normal start-end time range. All-day events
+    still carry a real Start_DateTime/End_DateTime from Zoho (usually
+    midnight-to-midnight), so without this a 3-day install would show a
+    literal, misleading "12:00 AM" on every card.
+    """
+    if not event.get("is_all_day"):
+        time_str = _format_time(event["start"])
+        if event.get("end") and event["end"] != event["start"]:
+            time_str += f" – {_format_time(event['end'])}"
+        return time_str
+
+    start_date = event["start"].date()
+    end_date = (event.get("end") or event["start"]).date()
+    if end_date > start_date:
+        span = f"{start_date.strftime('%b')} {start_date.day}–{end_date.day}"
+        if end_date.month != start_date.month:
+            span = f"{start_date.strftime('%b')} {start_date.day} – {end_date.strftime('%b')} {end_date.day}"
+        return f"All day ({span})"
+    return "All day"
+
+
 def _event_card_html(event: dict, tech_colors: dict) -> str:
     """
     The visual "card" for one event in the detailed day-by-day list: time,
@@ -71,9 +95,7 @@ def _event_card_html(event: dict, tech_colors: dict) -> str:
     tech_name = event.get("tech_name") or "Unassigned"
     tech = html_lib.escape(tech_name)
     color = tech_colors.get(tech_name, _OVERFLOW_COLOR)
-    time_str = html_lib.escape(_format_time(event["start"]))
-    if event.get("end") and event["end"] != event["start"]:
-        time_str += f" – {html_lib.escape(_format_time(event['end']))}"
+    time_str = html_lib.escape(_event_time_label(event))
     return (
         f'<div class="agenda-event" style="border-left-color:{color}">'
         f'<div class="agenda-event-top">'
@@ -85,59 +107,96 @@ def _event_card_html(event: dict, tech_colors: dict) -> str:
     )
 
 
-def _overview_month_grid_html(year: int, month: int, events_by_day: dict, tech_colors: dict) -> str:
+def _day_cell_html(day: dt.date, in_month: bool, today: dt.date, events_by_day: dict, tech_colors: dict, max_chips: int = 3) -> str:
     """
-    A compact, classic month grid (weeks starting Sunday) - the "see
-    everything at a glance" companion to the detailed day-by-day list
-    below it. Each day shows up to 3 tiny colored chips (one per event,
-    hover for a quick peek at time/title/tech) and a "+N more" note
-    beyond that - unlike the detailed list, this view is meant to be
-    skimmed, not read event-by-event, so some truncation here is fine.
+    One day's preview cell: the day number plus up to `max_chips` tiny
+    colored chips (one per event, hover for a quick peek at time/title/
+    tech) and a "+N more" note beyond that. Pure display - the actual pop-
+    out is a real Streamlit button rendered right below this in the same
+    grid cell (see _render_month_grid), since raw injected HTML can't
+    carry a click handler.
+    """
+    cell_classes = "ov-day"
+    if not in_month:
+        cell_classes += " ov-day-outside"
+    if day == today:
+        cell_classes += " ov-day-today"
+
+    day_events = events_by_day.get(day, [])
+    chip_html = ""
+    for event in day_events[:max_chips]:
+        tech_name = event.get("tech_name") or "Unassigned"
+        color = tech_colors.get(tech_name, _OVERFLOW_COLOR)
+        title = event.get("Event_Title") or "(untitled event)"
+        tooltip = html_lib.escape(f"{_event_time_label(event)} – {title} ({tech_name})")
+        chip_html += (
+            f'<div class="ov-chip" style="background:{color}" title="{tooltip}">'
+            f"{html_lib.escape(title)}</div>"
+        )
+    overflow = len(day_events) - max_chips
+    if overflow > 0:
+        chip_html += f'<div class="ov-more">+{overflow} more</div>'
+
+    day_num = str(day.day) if in_month else ""
+    return f'<div class="{cell_classes}"><div class="ov-daynum">{day_num}</div>{chip_html}</div>'
+
+
+@st.dialog("Day Details")
+def _show_day_dialog(day: dt.date, day_events: list) -> None:
+    """
+    Everything scheduled on one day - opened by clicking a day's "🔍 N"
+    button in the two-month overview grid, so a busy day's full job list
+    doesn't have to be puzzled out from three truncated chips and a
+    "+N more".
+    """
+    st.subheader(day.strftime("%A, %B %d, %Y"))
+
+    if not day_events:
+        st.info("No jobs scheduled.")
+        return
+
+    for event in day_events:
+        title = event.get("Event_Title") or "(untitled event)"
+        tech_name = event.get("tech_name") or "Unassigned"
+        st.write(f"**{_event_time_label(event)}** — {title}")
+        st.caption(f"Tech: {tech_name}")
+        st.divider()
+
+
+def _render_month_grid(year: int, month: int, events_by_day: dict, tech_colors: dict, today: dt.date) -> None:
+    """
+    A compact, classic month grid (weeks starting Sunday) built from real
+    Streamlit columns rather than an HTML <table> - the "see everything at
+    a glance" companion to the detailed day-by-day list below it. Each day
+    is a small preview (up to 3 colored chips + "+N more") with its own
+    "🔍" button that pops out the full job list for that day.
     """
     cal = calendar.Calendar(firstweekday=6)
     weeks = cal.monthdatescalendar(year, month)
-    today = dt.date.today()
-    month_label = f"{calendar.month_name[month]} {year}"
 
-    parts = [f'<div class="ov-month"><div class="ov-month-title">{html_lib.escape(month_label)}</div>']
-    parts.append('<table class="ov-grid"><thead><tr>')
-    for wd in ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"):
-        parts.append(f"<th>{wd}</th>")
-    parts.append("</tr></thead><tbody>")
+    header_cols = st.columns(7)
+    for col, label in zip(header_cols, ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")):
+        col.caption(label)
 
-    max_chips = 3
     for week in weeks:
-        parts.append("<tr>")
-        for day in week:
+        cols = st.columns(7)
+        for col, day in zip(cols, week):
             in_month = day.month == month
-            cell_classes = "ov-day"
-            if not in_month:
-                cell_classes += " ov-day-outside"
-            if day == today:
-                cell_classes += " ov-day-today"
-
-            day_events = events_by_day.get(day, [])
-            chip_html = ""
-            for event in day_events[:max_chips]:
-                tech_name = event.get("tech_name") or "Unassigned"
-                color = tech_colors.get(tech_name, _OVERFLOW_COLOR)
-                title = event.get("Event_Title") or "(untitled event)"
-                tooltip = html_lib.escape(f"{_format_time(event['start'])} – {title} ({tech_name})")
-                chip_html += (
-                    f'<div class="ov-chip" style="background:{color}" title="{tooltip}">'
-                    f"{html_lib.escape(title)}</div>"
+            with col:
+                st.markdown(
+                    _day_cell_html(day, in_month, today, events_by_day, tech_colors),
+                    unsafe_allow_html=True,
                 )
-            overflow = len(day_events) - max_chips
-            if overflow > 0:
-                chip_html += f'<div class="ov-more">+{overflow} more</div>'
-
-            day_num = str(day.day) if in_month else ""
-            parts.append(
-                f'<td class="{cell_classes}"><div class="ov-daynum">{day_num}</div>{chip_html}</td>'
-            )
-        parts.append("</tr>")
-    parts.append("</tbody></table></div>")
-    return "".join(parts)
+                if in_month:
+                    day_events = events_by_day.get(day, [])
+                    label = f"🔍 {len(day_events)}" if day_events else "🔍"
+                    if st.button(
+                        label,
+                        key=f"ovday_{day.isoformat()}",
+                        help="View everything scheduled this day",
+                        use_container_width=True,
+                    ):
+                        _show_day_dialog(day, day_events)
 
 
 _CALENDAR_CSS = """
@@ -162,15 +221,10 @@ _CALENDAR_CSS = """
 .cal-legend { margin-top: 10px; margin-bottom: 12px; font-size: 0.85rem; }
 .cal-legend-item { display: inline-flex; align-items: center; gap: 5px; margin-right: 16px; }
 .cal-legend-swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
-.ov-month { margin-bottom: 10px; }
-.ov-month-title { font-weight: 700; font-size: 1rem; margin-bottom: 6px; color: #0b0b0b; }
-.ov-grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
-.ov-grid th {
-    font-size: 0.72rem; font-weight: 700; color: #898781; padding: 4px 2px; text-align: left;
-}
+.ov-month-title { font-weight: 700; font-size: 1rem; margin-bottom: 2px; color: #0b0b0b; }
 .ov-day {
-    vertical-align: top; border: 1px solid #e1e0d9; padding: 4px; height: 78px; width: 14.28%;
-    overflow: hidden;
+    border: 1px solid #e1e0d9; border-radius: 4px; padding: 4px; height: 92px; overflow: hidden;
+    margin-bottom: 2px;
 }
 .ov-day-outside { background: #f9f9f7; }
 .ov-day-outside .ov-daynum { color: #c3c2b7; }
@@ -214,10 +268,7 @@ def _show_event_dialog(event: dict) -> None:
 
     start = event["start"]
     date_str = f"{start.strftime('%A, %B')} {start.day}, {start.year}"
-    time_str = _format_time(start)
-    if event.get("end") and event["end"] != start:
-        time_str += f" – {_format_time(event['end'])}"
-    st.write(f"**When:** {date_str}, {time_str}")
+    st.write(f"**When:** {date_str}, {_event_time_label(event)}")
 
     who = event.get("Who_Id")
     if isinstance(who, dict) and who.get("name"):
@@ -237,15 +288,16 @@ def _show_event_dialog(event: dict) -> None:
         st.write(description)
 
 
-def _render_overview(range_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict) -> None:
+def _render_overview(range_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict, today: dt.date) -> None:
     """
     The "see everything at a glance" companion view: a compact 2-month
-    grid, month1 and month2 side by side. Not clickable (unlike the
-    detailed list below) - it's meant for skimming volume and spotting
-    busy days, with a hover tooltip for a quick peek; open the day-by-day
-    list underneath for full details on any specific job.
+    grid, month1 and month2 side by side - a quick skim for volume and
+    busy days, with each day's "🔍" button popping out its full job list
+    (_show_day_dialog) for anyone who doesn't want to scroll the detailed
+    list below to find it.
     """
     st.markdown("###### Two-Month Overview")
+    st.caption("Click 🔍 on any day to see everything scheduled that day")
     col1, col2 = st.columns(2)
     months_seen = []
     current = dt.date(range_start.year, range_start.month, 1)
@@ -259,10 +311,9 @@ def _render_overview(range_start: dt.date, range_end: dt.date, events_by_day: di
 
     for col, (year, month) in zip((col1, col2), months_seen):
         with col:
-            st.markdown(
-                _overview_month_grid_html(year, month, events_by_day, tech_colors),
-                unsafe_allow_html=True,
-            )
+            month_label = f"{calendar.month_name[month]} {year}"
+            st.markdown(f'<div class="ov-month-title">{html_lib.escape(month_label)}</div>', unsafe_allow_html=True)
+            _render_month_grid(year, month, events_by_day, tech_colors, today)
 
 
 def _render_day_by_day(display_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict) -> None:
@@ -331,9 +382,22 @@ def _render_calendar_view(service: DashboardService) -> None:
     events = schedule["events"]
     tech_colors = _assign_tech_colors(events)
 
+    # A multi-day job (all-day or otherwise - e.g. a 3-day install running
+    # Sept 5-7) needs to appear on EVERY day it spans, not just the day it
+    # starts - otherwise it silently vanishes from the 2nd/3rd day of its
+    # own span in both the overview grid and the day-by-day list.
     events_by_day: dict = {}
     for event in events:
-        events_by_day.setdefault(event["start"].date(), []).append(event)
+        span_start = event["start"].date()
+        span_end = (event.get("end") or event["start"]).date()
+        # Clip to the displayed window - nothing outside it is ever shown,
+        # and this also guards against a bad/garbage End_DateTime turning
+        # one event into an unbounded loop.
+        day = max(span_start, range_start)
+        clipped_end = min(span_end, range_end)
+        while day <= clipped_end:
+            events_by_day.setdefault(day, []).append(event)
+            day += dt.timedelta(days=1)
 
     st.markdown(_CALENDAR_CSS, unsafe_allow_html=True)
 
@@ -345,7 +409,7 @@ def _render_calendar_view(service: DashboardService) -> None:
         )
         st.markdown(f'<div class="cal-legend">{legend_items}</div>', unsafe_allow_html=True)
 
-    _render_overview(range_start, range_end, events_by_day, tech_colors)
+    _render_overview(range_start, range_end, events_by_day, tech_colors, today)
 
     st.markdown("###### Day-by-Day Detail")
     default_date = today if range_start <= today <= range_end else range_start

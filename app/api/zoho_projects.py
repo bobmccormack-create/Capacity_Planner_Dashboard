@@ -261,10 +261,16 @@ class ZohoClient:
         office created the entry. Both are returned as raw Zoho fields;
         callers should treat this as unverified until checked against a
         real event.
+
+        All_day is fetched so multi-day "all day" jobs (e.g. a 3-day
+        install with no specific start/end time) can be shown correctly -
+        without it, a caller has no way to tell "no time given" apart from
+        "starts at midnight", and would otherwise only be able to place
+        the job on its first day.
         """
         url = f"{settings.zoho_crm_base()}/crm/v6/Events"
         fields = (
-            "Event_Title,Start_DateTime,End_DateTime,Owner,Who_Id,What_Id,"
+            "Event_Title,Start_DateTime,End_DateTime,All_day,Owner,Who_Id,What_Id,"
             "Description,Participants"
         )
         all_events: List[dict] = []

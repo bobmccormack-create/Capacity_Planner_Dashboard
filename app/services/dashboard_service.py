@@ -72,21 +72,23 @@ class DashboardService:
     def get_calendar_range(self, start_date: dt.date, end_date: dt.date) -> dict:
         """
         Returns: {"events": [ {..raw Zoho event fields.., "start": datetime,
-                   "end": datetime, "tech_name": str,
+                   "end": datetime, "tech_name": str, "is_all_day": bool,
                    "participant_names": [str, ...]} ], "error": str | None}
 
         Unlike get_upcoming_events, this is date-range based rather than
         "from now forward" - it includes events already in the past, which
         a month-grid view needs (e.g. showing Sept 1-4 even when today is
         Sept 5). An event is included if any part of it falls on or
-        between start_date and end_date (inclusive).
+        between start_date and end_date (inclusive) - callers that key
+        events by a single date should place a returned event on every day
+        from its start date to its end date, not just its start date, or
+        a multi-day job (all-day or otherwise) will only ever show up on
+        the first day of its span.
 
-        tech_name/participant_names: which Zoho field actually represents
-        "the assigned tech" hasn't been confirmed against a real account
-        yet - Owner could just be whoever in the office created the
-        calendar entry, not the tech doing the job. Both are extracted so
-        this can be checked against real data and corrected if Owner turns
-        out to be wrong.
+        tech_name: the Zoho Events "Owner" field - confirmed by the
+        business to be the assigned tech, not just whoever created the
+        entry. Techs on the standing exclusion list (_EXCLUDED_TECH_NAMES)
+        are dropped entirely before this function returns.
         """
         return _fetch_calendar_range_cached(start_date, end_date)
 
@@ -297,8 +299,23 @@ def _fetch_calendar_range_cached(start_date: dt.date, end_date: dt.date) -> dict
             "start": start,
             "end": end,
             "tech_name": tech_name,
+            # Zoho's own "All_day" flag on the Events module - an all-day
+            # job spanning several days (a 3-day install, say) has a real
+            # Start_DateTime/End_DateTime, but showing a literal time like
+            # "12:00 AM" for it is misleading, so callers use this to
+            # render "All day" instead.
+            "is_all_day": bool(event.get("All_day")),
             "participant_names": _extract_participant_names(event),
         })
 
-    in_range.sort(key=lambda e: e["start"])
+    # .replace(tzinfo=None) rather than comparing "start" directly: an
+    # all-day event's Start_DateTime can come back from Zoho as a bare
+    # date ("2026-09-05", no offset) while a normal timed event carries a
+    # UTC offset - Python raises TypeError comparing an offset-naive and
+    # an offset-aware datetime, which would crash this sort (and silently
+    # take the whole calendar down) the moment a single all-day event
+    # showed up alongside a timed one. Stripping tzinfo for the sort key
+    # only (never for display) keeps relative order correct for a single-
+    # location business where every timed event already shares one offset.
+    in_range.sort(key=lambda e: e["start"].replace(tzinfo=None))
     return {"events": in_range, "error": None}
