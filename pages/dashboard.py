@@ -1,10 +1,20 @@
 import calendar
 import datetime as dt
 import html as html_lib
+import re
 
 import streamlit as st
 
+import pandas as pd
+
+from app.services.capacity_service import CapacityService
 from app.services.dashboard_service import DashboardService
+from app.services.labor_buckets import (
+    OVERHEAD_BUCKETS,
+    PROJECT_BUCKETS,
+    UNAVAILABLE_BUCKETS,
+    label,
+)
 from app.utils.auth import check_password
 
 # Categorical palette (fixed order - never cycled/reassigned) from the
@@ -287,6 +297,46 @@ def _show_event_dialog(event: dict) -> None:
         st.write("**Notes:**")
         st.write(description)
 
+    # ---- hours logged against this job --------------------------------
+    # The point of the link: a scheduled event says what was planned, the
+    # timesheets say what it cost. Matching is by street number plus a
+    # shared word, since the event says "740 Sanchez Rough In" while the
+    # jobcode says "6387 - 740 Sanchez_Av Tech".
+    try:
+        from app.services.capacity_service import CapacityService
+
+        data = CapacityService().get_project_hours(12)   # months
+        if data.get("error"):
+            return
+        matches = _match_jobs_for_title(title, data["jobs"])
+    except Exception:  # noqa: BLE001 - never break the dialog over this
+        return
+
+    st.divider()
+    if not matches:
+        st.caption(
+            "No jobcode matched this event title, so no hours to show. "
+            "Matching needs a street number and a word in common with the "
+            "jobcode name."
+        )
+        return
+
+    st.markdown("**Hours logged (last 12 months)**")
+    if len(matches) > 1:
+        picked_label = st.selectbox(
+            "Jobcode",
+            [f"{m['name']}  —  {m['total']:,.0f}h" for m in matches],
+            key=f"evjob_{event.get('id') or title[:20]}",
+        )
+        job = matches[[f"{m['name']}  —  {m['total']:,.0f}h"
+                       for m in matches].index(picked_label)]
+    else:
+        job = matches[0]
+        st.caption(job["name"])
+
+    _render_project_hours(job, data["daily"].get(job["jobcode_id"], []),
+                          compact=True)
+
 
 def _render_overview(range_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict, today: dt.date) -> None:
     """
@@ -453,12 +503,389 @@ def _render_calendar_view(service: DashboardService) -> None:
         st.caption(f"Note: showing possibly-incomplete data - last refresh had an error ({schedule['error']})")
 
 
+# Months, not days: the snapshot stores per-person hours by month, so a
+# shorter window than one month can't be computed from it.
+_WINDOW_CHOICES = {
+    "This month": 1,
+    "Last 3 months": 3,
+    "Last 6 months": 6,
+    "Last 12 months": 12,
+    "Everything": 0,
+}
+
+
+def _bucket_kind(bucket: str) -> str:
+    if bucket in PROJECT_BUCKETS:
+        return "Project"
+    if bucket in OVERHEAD_BUCKETS:
+        return "Overhead"
+    if bucket in UNAVAILABLE_BUCKETS:
+        return "Unavailable"
+    return "Untagged"
+
+
+# ---------------------------------------------------------------------------
+# Project drill-in
+# ---------------------------------------------------------------------------
+
+_STOP = {
+    "the", "and", "svc", "service", "services", "av", "tech", "net", "system",
+    "systems", "update", "updates", "upgrade", "install", "installation",
+    "project", "rough", "trim", "final", "finish", "prewire", "in", "phase",
+    "do", "not", "use", "st", "ave", "rd", "dr", "ln", "ct", "blvd", "way",
+    "shade", "shades", "lighting", "design", "support", "walk", "review",
+}
+
+
+def _tokens(text: str) -> tuple:
+    """(street numbers, meaningful words) for loose name comparison."""
+    cleaned = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
+    parts = cleaned.split()
+    nums = {p for p in parts if p.isdigit()}
+    words = {p for p in parts if not p.isdigit() and len(p) > 2 and p not in _STOP}
+    return nums, words
+
+
+def _match_jobs_for_title(title: str, jobs: list) -> list:
+    """
+    Jobcodes plausibly matching a calendar event title.
+
+    A Zoho event reads "740 Sanchez Rough In" while the jobcode reads
+    "6387 - 740 Sanchez_Av Tech" - so matching is anchored on a shared
+    street number AND a shared word. The number alone is not enough:
+    "2700 Redwolf" and "2700 Pierce" share 2700 and are different sites.
+    """
+    t_nums, t_words = _tokens(title)
+    if not t_nums or not t_words:
+        return []
+    hits = []
+    for job in jobs:
+        # strip the leading job number so it can't be read as a street number
+        name = re.sub(r"^\s*\(?(?:DO NOT USE\)?\s*)?#?\d{3,6}\s*[-,:]\s*", "",
+                      job["name"], flags=re.IGNORECASE)
+        j_nums, j_words = _tokens(name)
+        if (t_nums & j_nums) and (t_words & j_words):
+            hits.append(job)
+    hits.sort(key=lambda j: -j["total"])
+    return hits
+
+
+def _render_project_hours(job: dict, rows: list, compact: bool = False) -> None:
+    """Totals and the daily rough/trim/final breakdown for one jobcode."""
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total hours", f"{job['total']:,.1f}")
+    c2.metric("Rough", f"{job['rough']:,.1f}")
+    c3.metric("Trim", f"{job['trim']:,.1f}")
+    c4.metric("Final", f"{job['final']:,.1f}")
+
+    if job["other"] > 0:
+        st.caption(
+            f"{job['other']:,.1f}h logged to this job outside rough/trim/final "
+            "(PM, engineering, service, shading, admin)."
+        )
+
+    if not rows:
+        st.info("No daily entries in this window.")
+        return
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+
+    chart = df.set_index("date")[["rough", "trim", "final"]]
+    if chart.to_numpy().sum() > 0:
+        st.bar_chart(chart, height=220 if compact else 300)
+    else:
+        st.caption("No rough/trim/final hours - all time on this job is "
+                   "other work.")
+
+    st.dataframe(
+        df[["date", "rough", "trim", "final", "other", "total"]]
+          .sort_values("date", ascending=False),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "date": st.column_config.DateColumn("Date", format="ddd DD MMM YYYY"),
+            "rough": st.column_config.NumberColumn(format="%.2f"),
+            "trim": st.column_config.NumberColumn(format="%.2f"),
+            "final": st.column_config.NumberColumn(format="%.2f"),
+            "other": st.column_config.NumberColumn(format="%.2f"),
+            "total": st.column_config.NumberColumn(format="%.2f"),
+        },
+        height=260 if compact else 420,
+    )
+
+    if job["people"]:
+        st.caption("Worked by: " + ", ".join(job["people"]))
+
+
+def _render_projects_section(capacity_service) -> None:
+    """Pick a job, see its daily hours split rough / trim / final."""
+    st.markdown("###### Hours by project")
+
+    window = st.selectbox(
+        "History",
+        list(_WINDOW_CHOICES.keys()),
+        index=1,
+        key="proj_window",
+        help="All of this comes from the same nightly snapshot, so a longer "
+             "window costs nothing.",
+    )
+
+    data = capacity_service.get_project_hours(_WINDOW_CHOICES[window])
+    if data["error"]:
+        st.warning(f"Couldn't read project hours. ({data['error']})")
+        return
+    if not data["jobs"]:
+        st.info("No project hours in this window.")
+        return
+
+    jobs = data["jobs"]
+    only_install = st.checkbox(
+        "Only jobs with rough/trim/final hours", value=False,
+        help="Jobs are already sorted with the busiest installs first. "
+             "Tick this to hide jobs that are all PM, engineering or service.",
+    )
+    shown = [j for j in jobs
+             if not only_install or j.get("install_total", 0) > 0]
+    if not shown:
+        st.info("No jobs with install hours in this window.")
+        return
+    st.caption(f"{len(shown):,} jobs with hours in this window "
+               "(Admin, Drive, Holiday and similar are excluded)")
+
+    labels = {
+        f"{j['name']}  —  {j['total']:,.0f}h": j["jobcode_id"] for j in shown
+    }
+    picked_label = st.selectbox("Project", list(labels.keys()), key="proj_pick")
+    picked_id = labels[picked_label]
+    job = next(j for j in shown if j["jobcode_id"] == picked_id)
+
+    st.caption(
+        f"{job['name']}"
+        + (f"  ·  job {job['job_number']}" if job["job_number"] else "")
+        + (f"  ·  {job['first_day']} to {job['last_day']}"
+           if job["first_day"] else "")
+        + ("" if job["active"] else "  ·  INACTIVE")
+    )
+
+    _render_project_hours(job, data["daily"].get(picked_id, []))
+
+    # Other jobcodes on the same site - a job usually has several, split by
+    # vertical, and a PM thinks of them as one project.
+    if job["job_number"]:
+        nums, words = _tokens(re.sub(
+            r"^\s*\(?(?:DO NOT USE\)?\s*)?#?\d{3,6}\s*[-,:]\s*", "",
+            job["name"], flags=re.IGNORECASE))
+        siblings = []
+        for other in jobs:
+            if other["jobcode_id"] == picked_id:
+                continue
+            o_nums, o_words = _tokens(re.sub(
+                r"^\s*\(?(?:DO NOT USE\)?\s*)?#?\d{3,6}\s*[-,:]\s*", "",
+                other["name"], flags=re.IGNORECASE))
+            if (nums & o_nums) and (words & o_words):
+                siblings.append(other)
+        if siblings:
+            with st.expander(
+                f"Other jobcodes at this site ({len(siblings)}) — "
+                f"{sum(s['total'] for s in siblings):,.0f}h more"
+            ):
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Jobcode": s["name"], "Total": s["total"],
+                         "Rough": s["rough"], "Trim": s["trim"],
+                         "Final": s["final"]}
+                        for s in siblings
+                    ]),
+                    hide_index=True, use_container_width=True,
+                )
+                st.caption(
+                    "Sites usually carry several jobcodes split by vertical "
+                    "(AV, shades, lighting). Budget comparisons should use "
+                    "the site total, not one code."
+                )
+
+
+def _render_capacity_view(capacity_service) -> None:
+    """
+    Where the hours actually went.
+
+    Sourced entirely from QuickBooks Time, because Zoho holds no time at
+    all - every cost field comes back empty and percent-complete can't be
+    trusted (901 Seabury Phase 2 sat at 0% with 298 hours logged against
+    it). Hours are the only record of what really happened.
+    """
+    st.subheader("Capacity")
+
+    ctrl_left, ctrl_right = st.columns([3, 1], vertical_alignment="bottom")
+    with ctrl_left:
+        window_label = st.selectbox(
+            "Window",
+            list(_WINDOW_CHOICES.keys()),
+            index=1,
+            help="Longer windows take about a minute to pull the first "
+                 "time, then they're cached for an hour.",
+        )
+    with ctrl_right:
+        if st.button("Reload", use_container_width=True,
+                     help="Re-read the snapshot file. To pull fresh hours "
+                          "from QuickBooks Time, run the nightly build."):
+            capacity_service.clear_cache()
+            st.rerun()
+
+    status = capacity_service.status()
+    if not status["ok"]:
+        st.warning(
+            f"No snapshot available. ({status['error']})\n\n"
+            "The dashboard reads a nightly snapshot rather than calling "
+            "QuickBooks Time directly. Build one with:\n\n"
+            "`python scripts/build_snapshot.py --months 24 --local-only`"
+        )
+        return
+
+    data = capacity_service.get_capacity(_WINDOW_CHOICES[window_label])
+
+    if data.get("error"):
+        st.warning(f"Couldn't read the snapshot. ({data['error']})")
+        return
+    if data.get("note"):
+        st.info(data["note"])
+
+    if not data["people"] and not data["office"]:
+        st.info("No timesheet entries in this window.")
+        return
+
+    w = status["window"] or {}
+    st.caption(
+        f"Snapshot {status['age']}"
+        + (f" · {status['entries']:,} entries" if status.get("entries") else "")
+        + (f" · covering {w.get('start')} to {w.get('end')}" if w else "")
+        + f" · read from {status['source']}"
+    )
+
+    totals = data["totals"]
+    worked = totals["worked"] or 1
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Hours worked", f"{totals['worked']:,.0f}")
+    m2.metric("On projects", f"{totals['project']:,.0f}",
+              f"{totals['project'] / worked * 100:.1f}% of worked")
+    m3.metric("Overhead", f"{totals['overhead']:,.0f}",
+              f"{totals['overhead'] / worked * 100:.1f}% of worked",
+              delta_color="inverse")
+    m4.metric("Capacity staff", len(data["people"]),
+              f"{len(data['office'])} office excluded", delta_color="off")
+
+    if totals["untagged"] > 0:
+        st.caption(
+            f"{totals['untagged']:,.0f}h carry no phase tag, so they aren't "
+            "counted as project work. Worth chasing if that number is large."
+        )
+
+    st.divider()
+
+    # ---- where the hours went -------------------------------------------
+    st.markdown("###### Where the hours went")
+    bucket_total = sum(data["buckets"].values()) or 1
+    bucket_rows = [
+        {
+            "Bucket": label(b),
+            "Hours": round(h, 1),
+            "Share": h / bucket_total * 100,
+            "Kind": _bucket_kind(b),
+        }
+        for b, h in sorted(data["buckets"].items(), key=lambda kv: -kv[1])
+    ]
+    st.dataframe(
+        pd.DataFrame(bucket_rows),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Hours": st.column_config.NumberColumn(format="%.1f"),
+            "Share": st.column_config.ProgressColumn(
+                "Share", format="%.1f%%", min_value=0, max_value=100),
+        },
+    )
+    st.caption(
+        "Time off and unpaid break are excluded from utilisation entirely - "
+        "capacity that never existed, rather than capacity that went unused."
+    )
+
+    st.divider()
+
+    # ---- people ----------------------------------------------------------
+    st.markdown("###### People")
+    roles = sorted({p["role"] for p in data["people"]})
+    chosen = st.multiselect("Filter by role", roles, default=roles)
+
+    people_rows = [
+        {
+            "Name": p["name"],
+            "Role": p["role"],
+            "Worked": p["worked"],
+            "On projects": p["project"],
+            "Utilisation": p["utilisation"],
+            "Jobs": p["jobs"],
+            "Confidence": p["confidence"],
+        }
+        for p in data["people"] if p["role"] in chosen
+    ]
+
+    if people_rows:
+        st.dataframe(
+            pd.DataFrame(people_rows),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Worked": st.column_config.NumberColumn(format="%.1f"),
+                "On projects": st.column_config.NumberColumn(format="%.1f"),
+                "Utilisation": st.column_config.ProgressColumn(
+                    "Utilisation", format="%.1f%%", min_value=0, max_value=100),
+            },
+        )
+        st.caption(
+            "Utilisation is project hours divided by hours worked. A low "
+            "figure means time went to admin or drive - not that someone "
+            "was idle."
+        )
+    else:
+        st.info("No roles selected.")
+
+    if data["office"]:
+        office_hours = sum(p["worked"] for p in data["office"])
+        with st.expander(
+            f"Office staff — {len(data['office'])} people, "
+            f"{office_hours:,.0f}h (excluded from capacity)"
+        ):
+            st.dataframe(
+                pd.DataFrame([
+                    {"Name": p["name"], "Worked": p["worked"],
+                     "Admin + drive": p["overhead"]}
+                    for p in data["office"]
+                ]),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Worked": st.column_config.NumberColumn(format="%.1f"),
+                    "Admin + drive": st.column_config.NumberColumn(format="%.1f"),
+                },
+            )
+            st.caption(
+                "Almost all of their time is Admin with no project phase. "
+                "Counting them dragged company-wide utilisation down without "
+                "saying anything about field capacity."
+            )
+
+    st.divider()
+    _render_projects_section(capacity_service)
+
+
 def render():
     """
-    Dashboard page
+    Dashboard page.
     """
-
     service = DashboardService()
+    capacity_service = CapacityService()
     kpis = service.get_kpis()
 
     st.title("🏠 Operations Command Center")
@@ -479,8 +906,6 @@ def render():
     with col4:
         st.metric("CRM Users", kpis["users"])
 
-    st.divider()
-
     if kpis["source"] == "zoho":
         st.success("Connected to Zoho CRM")
     else:
@@ -491,17 +916,15 @@ def render():
 
     st.divider()
 
-    _render_calendar_view(service)
+    schedule_tab, capacity_tab = st.tabs(["📅 Schedule", "📊 Capacity"])
+
+    with schedule_tab:
+        _render_calendar_view(service)
+
+    with capacity_tab:
+        _render_capacity_view(capacity_service)
 
 
-# Streamlit's "pages/" folder is auto-detected and turned into a multipage
-# sidebar nav item ("dashboard"), separate from main.py importing and
-# calling render() directly. When Streamlit runs this file *as that page*
-# (not when main.py imports it), it executes it with __name__ == "__main__",
-# so this guard renders the same content there too - without it, clicking
-# "dashboard" in the sidebar showed a blank page (render() was never
-# called), and switch to that page didn't produce a first-run error since
-# Streamlit ran the script but nothing in it drew anything.
 if __name__ == "__main__":
     st.set_page_config(
         page_title="Capacity Planner",
