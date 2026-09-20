@@ -4,3 +4,15 @@ __pycache__/
 *.db
 .venv/
 venv/
+
+.cache/
+.streamlit/secrets.toml
+roles.csv
+job_mapping_review.csv
+*.zip
+
+.cache/
+.streamlit/secrets.toml
+roles.csv
+job_mapping_review.csv
+*.zip

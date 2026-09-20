@@ -17,6 +17,8 @@ from app.services.labor_buckets import (
 )
 from app.utils.auth import check_password
 
+import theme
+
 # Categorical palette (fixed order - never cycled/reassigned) from the
 # house data-viz palette: colorblind-safe adjacent pairs, validated for a
 # light surface. One color per tech, assigned in order of first
@@ -128,7 +130,11 @@ def _day_cell_html(day: dt.date, in_month: bool, today: dt.date, events_by_day: 
     """
     cell_classes = "ov-day"
     if not in_month:
-        cell_classes += " ov-day-outside"
+        # Out-of-month cells are spacers. They get no day number and no View
+        # button, so drawing their chips made them look like real days whose
+        # button had gone missing - and those days already appear, with their
+        # button, in the adjacent month's own grid.
+        return '<div class="ov-day ov-day-outside"></div>'
     if day == today:
         cell_classes += " ov-day-today"
 
@@ -151,13 +157,12 @@ def _day_cell_html(day: dt.date, in_month: bool, today: dt.date, events_by_day: 
     return f'<div class="{cell_classes}"><div class="ov-daynum">{day_num}</div>{chip_html}</div>'
 
 
-@st.dialog("Day Details")
+@st.dialog("Day Details", width="large")
 def _show_day_dialog(day: dt.date, day_events: list) -> None:
     """
-    Everything scheduled on one day - opened by clicking a day's "🔍 N"
-    button in the two-month overview grid, so a busy day's full job list
-    doesn't have to be puzzled out from three truncated chips and a
-    "+N more".
+    Everything scheduled on one day - opened by clicking that day's cell in
+    the two-month overview grid, so a busy day's full job list doesn't have
+    to be puzzled out from three truncated chips and a "+N more".
     """
     st.subheader(day.strftime("%A, %B %d, %Y"))
 
@@ -165,11 +170,21 @@ def _show_day_dialog(day: dt.date, day_events: list) -> None:
         st.info("No jobs scheduled.")
         return
 
-    for event in day_events:
+    st.caption("Open a job to see the hours logged against it.")
+
+    for idx, event in enumerate(day_events):
         title = event.get("Event_Title") or "(untitled event)"
         tech_name = event.get("tech_name") or "Unassigned"
         st.write(f"**{_event_time_label(event)}** — {title}")
         st.caption(f"Tech: {tech_name}")
+        # A dialog can't open another dialog, so the per-event detail lives
+        # in an expander here rather than reusing _show_event_dialog.
+        with st.expander("Project details"):
+            _render_event_body(
+                event,
+                key_prefix=f"day_{day.isoformat()}_{idx}",
+                show_header=False,
+            )
         st.divider()
 
 
@@ -178,8 +193,8 @@ def _render_month_grid(year: int, month: int, events_by_day: dict, tech_colors: 
     A compact, classic month grid (weeks starting Sunday) built from real
     Streamlit columns rather than an HTML <table> - the "see everything at
     a glance" companion to the detailed day-by-day list below it. Each day
-    is a small preview (up to 3 colored chips + "+N more") with its own
-    "🔍" button that pops out the full job list for that day.
+    is a small preview (up to 3 colored chips + "+N more"), and the cell
+    itself pops out the full job list for that day when clicked.
     """
     cal = calendar.Calendar(firstweekday=6)
     weeks = cal.monthdatescalendar(year, month)
@@ -193,106 +208,116 @@ def _render_month_grid(year: int, month: int, events_by_day: dict, tech_colors: 
         for col, day in zip(cols, week):
             in_month = day.month == month
             with col:
-                st.markdown(
-                    _day_cell_html(day, in_month, today, events_by_day, tech_colors),
-                    unsafe_allow_html=True,
-                )
-                if in_month:
-                    day_events = events_by_day.get(day, [])
-                    label = f"🔍 {len(day_events)}" if day_events else "🔍"
+                if not in_month:
+                    st.markdown(
+                        _day_cell_html(day, in_month, today, events_by_day,
+                                       tech_colors),
+                        unsafe_allow_html=True,
+                    )
+                    continue
+                day_events = events_by_day.get(day, [])
+                with st.container(key=f"daylink-{day.isoformat()}"):
+                    st.markdown(
+                        _day_cell_html(day, in_month, today, events_by_day,
+                                       tech_colors),
+                        unsafe_allow_html=True,
+                    )
                     if st.button(
-                        label,
-                        key=f"ovday_{day.isoformat()}",
-                        help="View everything scheduled this day",
+                        f"View {len(day_events)}" if day_events else "View",
+                        key=f"daylink-{day.isoformat()}-btn",
                         use_container_width=True,
+                        help=f"Everything scheduled {day.strftime('%B')} {day.day}",
                     ):
                         _show_day_dialog(day, day_events)
 
 
-_CALENDAR_CSS = """
+_CALENDAR_CSS = f"""
 <style>
-.agenda-day-header {
-    position: sticky; top: 0; background: #fcfcfb; padding: 10px 0 6px 0;
-    margin-top: 14px; border-top: 1px solid #e1e0d9;
-    font-size: 1.1rem; font-weight: 700; color: #0b0b0b; z-index: 1;
-}
-.agenda-day-header-today { color: #2a78d6; }
-.agenda-empty { color: #898781; font-style: italic; font-size: 0.85rem; padding: 0 0 14px 0; }
-.agenda-event {
-    border-left: 4px solid; border-radius: 6px; padding: 10px 14px; margin: 6px 0 8px 0;
-    background: #f9f9f7;
-}
-.agenda-event-top { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; flex-wrap: wrap; }
-.agenda-event-time { font-weight: 700; font-size: 0.95rem; color: #52514e; }
-.agenda-event-tech {
-    color: #ffffff; font-size: 0.78rem; font-weight: 700; padding: 3px 10px; border-radius: 10px;
-}
-.agenda-event-title { font-size: 1.05rem; color: #0b0b0b; line-height: 1.4; }
-.cal-legend { margin-top: 10px; margin-bottom: 12px; font-size: 0.85rem; }
-.cal-legend-item { display: inline-flex; align-items: center; gap: 5px; margin-right: 16px; }
-.cal-legend-swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
-.ov-month-title { font-weight: 700; font-size: 1rem; margin-bottom: 2px; color: #0b0b0b; }
-.ov-day {
-    border: 1px solid #e1e0d9; border-radius: 4px; padding: 4px; height: 92px; overflow: hidden;
-    margin-bottom: 2px;
-}
-.ov-day-outside { background: #f9f9f7; }
-.ov-day-outside .ov-daynum { color: #c3c2b7; }
-.ov-day-today { background: #eaf2fd; border-color: #2a78d6; }
-.ov-daynum { font-size: 0.78rem; font-weight: 700; color: #52514e; margin-bottom: 2px; }
-.ov-chip {
-    color: #ffffff; font-size: 0.66rem; font-weight: 600; padding: 1px 4px; border-radius: 3px;
+.agenda-day-header {{
+    position: sticky; top: 0; background: {theme.PAPER}; padding: 10px 0 6px 0;
+    margin-top: 14px; border-top: 1px solid {theme.RULE};
+    font-family: 'Outfit', sans-serif;
+    font-size: 1.02rem; font-weight: 600; color: {theme.INK}; z-index: 1;
+    letter-spacing: -0.01em;
+}}
+.agenda-day-header-today {{ color: {theme.PERI}; }}
+.agenda-empty {{ color: {theme.SLATE}; font-size: 0.85rem; padding: 0 0 14px 0; }}
+.agenda-event {{
+    border-left: 3px solid; border-radius: 7px; padding: 10px 14px; margin: 6px 0 8px 0;
+    background: {theme.BONE};
+}}
+.agenda-event-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 4px; flex-wrap: wrap; }}
+.agenda-event-time {{ font-weight: 600; font-size: 0.9rem; color: {theme.SLATE}; }}
+.agenda-event-tech {{
+    color: #ffffff; font-size: 0.74rem; font-weight: 600; padding: 3px 10px; border-radius: 10px;
+}}
+.agenda-event-title {{ font-size: 0.98rem; color: {theme.INK}; line-height: 1.45; }}
+.cal-legend {{ margin-top: 10px; margin-bottom: 14px; font-size: 0.82rem; color: {theme.SLATE}; }}
+.cal-legend-item {{ display: inline-flex; align-items: center; gap: 5px; margin-right: 16px; }}
+.cal-legend-swatch {{ width: 10px; height: 10px; border-radius: 3px; display: inline-block; }}
+.ov-month-title {{
+    font-family: 'Outfit', sans-serif; font-weight: 600; font-size: 0.98rem;
+    margin-bottom: 6px; color: {theme.INK};
+}}
+.ov-day {{
+    border: 1px solid {theme.RULE}; border-radius: 6px; padding: 5px; height: 92px;
+    overflow: hidden; margin-bottom: 2px; background: {theme.PAPER};
+}}
+.ov-day-outside {{ background: {theme.BONE}; }}
+.ov-day-outside .ov-daynum {{ color: #C4C0B8; }}
+.ov-day-today {{ background: #EFF3FC; border-color: {theme.PERI}; }}
+.ov-daynum {{ font-size: 0.76rem; font-weight: 600; color: {theme.SLATE}; margin-bottom: 3px; }}
+.ov-chip {{
+    color: #ffffff; font-size: 0.65rem; font-weight: 500; padding: 1px 5px; border-radius: 3px;
     margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.ov-more { font-size: 0.65rem; color: #898781; font-style: italic; }
-@media (prefers-color-scheme: dark) {
-    .agenda-day-header { background: #1a1a19; color: #ffffff; border-top-color: #2c2c2a; }
-    .agenda-day-header-today { color: #3987e5; }
-    .agenda-event { background: #0d0d0d; }
-    .agenda-event-time { color: #c3c2b7; }
-    .agenda-event-title { color: #ffffff; }
-    .ov-month-title { color: #ffffff; }
-    .ov-day { border-color: #2c2c2a; }
-    .ov-day-outside { background: #0d0d0d; }
-    .ov-day-today { background: #16283f; border-color: #3987e5; }
-    .ov-daynum { color: #c3c2b7; }
-}
+}}
+.ov-more {{ font-size: 0.65rem; color: {theme.SLATE}; }}
+
 </style>
 """
 
 
-@st.dialog("Event Details")
-def _show_event_dialog(event: dict) -> None:
+def _render_event_body(event: dict, key_prefix: str,
+                       show_header: bool = True) -> None:
     """
-    Full info for one calendar event, opened by clicking its "Details"
-    button in the day-by-day list. Uses st.write/st.markdown (never
-    unsafe_allow_html) throughout, so nothing in Zoho's data - a title,
-    description, or contact name someone typed into the CRM - can inject
-    raw HTML here.
+    One event's full detail: the extra Zoho fields, then the hours actually
+    logged against the matching jobcode.
+
+    Shared so the standalone Event Details dialog and the per-event expander
+    inside Day Details show exactly the same thing - clicking a job in the
+    day pop-out shouldn't be a lesser view than clicking it in the list
+    below. key_prefix keeps the jobcode selectbox unique when several of
+    these render at once inside one day.
+
+    Uses st.write/st.markdown (never unsafe_allow_html), so nothing in Zoho's
+    data - a title, description, or contact name someone typed into the CRM -
+    can inject raw HTML here.
     """
     title = event.get("Event_Title") or "(untitled event)"
-    st.subheader(title)
-
     tech_name = event.get("tech_name") or "Unassigned"
-    st.write(f"**Tech:** {tech_name}")
-
     start = event["start"]
-    date_str = f"{start.strftime('%A, %B')} {start.day}, {start.year}"
-    st.write(f"**When:** {date_str}, {_event_time_label(event)}")
+
+    if show_header:
+        st.subheader(f"{start.strftime('%A, %B')} {start.day}, {start.year}")
+        st.write(f"**{_event_time_label(event)}** — {title}")
+        st.caption(f"Tech: {tech_name}")
 
     who = event.get("Who_Id")
+    what = event.get("What_Id")
+    participants = event.get("participant_names") or []
+    description = event.get("Description")
+
+    if show_header and any([isinstance(who, dict) and who.get("name"),
+                            isinstance(what, dict) and what.get("name"),
+                            participants, description]):
+        st.divider()
+
     if isinstance(who, dict) and who.get("name"):
         st.write(f"**Related contact:** {who['name']}")
-
-    what = event.get("What_Id")
     if isinstance(what, dict) and what.get("name"):
         st.write(f"**Related to:** {what['name']}")
-
-    participants = event.get("participant_names") or []
     if participants:
         st.write(f"**Participants:** {', '.join(participants)}")
-
-    description = event.get("Description")
     if description:
         st.write("**Notes:**")
         st.write(description)
@@ -312,7 +337,8 @@ def _show_event_dialog(event: dict) -> None:
     except Exception:  # noqa: BLE001 - never break the dialog over this
         return
 
-    st.divider()
+    if show_header:
+        st.divider()
     if not matches:
         st.caption(
             "No jobcode matched this event title, so no hours to show. "
@@ -326,7 +352,7 @@ def _show_event_dialog(event: dict) -> None:
         picked_label = st.selectbox(
             "Jobcode",
             [f"{m['name']}  —  {m['total']:,.0f}h" for m in matches],
-            key=f"evjob_{event.get('id') or title[:20]}",
+            key=f"evjob_{key_prefix}",
         )
         job = matches[[f"{m['name']}  —  {m['total']:,.0f}h"
                        for m in matches].index(picked_label)]
@@ -335,19 +361,29 @@ def _show_event_dialog(event: dict) -> None:
         st.caption(job["name"])
 
     _render_project_hours(job, data["daily"].get(job["jobcode_id"], []),
-                          compact=True)
+                          compact=True, names=data.get("names"),
+                          key_prefix=key_prefix)
+
+
+@st.dialog("Event Details", width="large")
+def _show_event_dialog(event: dict) -> None:
+    """One event, opened from the day-by-day list below the calendar."""
+    _render_event_body(
+        event,
+        key_prefix=f"dlg_{event.get('id') or (event.get('Event_Title') or '')[:20]}",
+    )
 
 
 def _render_overview(range_start: dt.date, range_end: dt.date, events_by_day: dict, tech_colors: dict, today: dt.date) -> None:
     """
     The "see everything at a glance" companion view: a compact 2-month
     grid, month1 and month2 side by side - a quick skim for volume and
-    busy days, with each day's "🔍" button popping out its full job list
+    busy days, with each day popping out its full job list
     (_show_day_dialog) for anyone who doesn't want to scroll the detailed
     list below to find it.
     """
-    st.markdown("###### Two-Month Overview")
-    st.caption("Click 🔍 on any day to see everything scheduled that day")
+    st.markdown("### Two-month overview")
+    st.caption("Click any day to see everything scheduled on it")
     col1, col2 = st.columns(2)
     months_seen = []
     current = dt.date(range_start.year, range_start.month, 1)
@@ -383,7 +419,7 @@ def _render_day_by_day(display_start: dt.date, range_end: dt.date, events_by_day
     """
     today = dt.date.today()
 
-    with st.container(height=700):
+    with st.container(height=700, border=True):
         current = display_start
         while current <= range_end:
             is_today = current == today
@@ -401,19 +437,20 @@ def _render_day_by_day(display_start: dt.date, range_end: dt.date, events_by_day
                 st.markdown('<div class="agenda-empty">No jobs scheduled</div>', unsafe_allow_html=True)
             else:
                 for idx, event in enumerate(day_events):
-                    card_col, btn_col = st.columns([8, 1], vertical_alignment="center")
-                    with card_col:
-                        st.markdown(_event_card_html(event, tech_colors), unsafe_allow_html=True)
-                    with btn_col:
-                        button_key = f"ev_{current.isoformat()}_{idx}_{event.get('id') or ''}"
-                        if st.button("🔍", key=button_key, help="View details", use_container_width=True):
+                    with st.container(key=f"evlink-{current.isoformat()}-{idx}"):
+                        st.markdown(_event_card_html(event, tech_colors),
+                                    unsafe_allow_html=True)
+                        if st.button(
+                            "Details",
+                            key=f"evlink-{current.isoformat()}-{idx}-btn",
+                        ):
                             _show_event_dialog(event)
 
             current += dt.timedelta(days=1)
 
 
 def _render_calendar_view(service: DashboardService) -> None:
-    st.subheader("📅 Schedule")
+    st.markdown("## Schedule")
     st.caption("From Zoho CRM's Calendar - this month and next")
 
     today = dt.date.today()
@@ -461,7 +498,7 @@ def _render_calendar_view(service: DashboardService) -> None:
 
     _render_overview(range_start, range_end, events_by_day, tech_colors, today)
 
-    st.markdown("###### Day-by-Day Detail")
+    st.markdown("### Day by day")
     default_date = today if range_start <= today <= range_end else range_start
 
     # A "Reset to today" click has to update calendar_jump_date *before*
@@ -493,7 +530,7 @@ def _render_calendar_view(service: DashboardService) -> None:
             st.session_state["_reset_calendar_jump"] = True
             st.rerun()
 
-    st.caption("Scroll for more - click 🔍 on any job to see its full details")
+    st.caption("Scroll for more - click any job to see its full details")
     _render_day_by_day(display_start, range_end, events_by_day, tech_colors)
 
     if not events and not schedule["error"]:
@@ -570,13 +607,60 @@ def _match_jobs_for_title(title: str, jobs: list) -> list:
     return hits
 
 
-def _render_project_hours(job: dict, rows: list, compact: bool = False) -> None:
+_WHO_COLUMNS = ["rough", "trim", "final", "prog", "shade", "light", "pm",
+                "eng", "travel", "admin", "service", "other"]
+
+
+def _render_day_attribution(row: dict, names: dict) -> None:
+    """
+    Who logged the hours on one day of one job.
+
+    Reads the per-day "who" map added in snapshot schema 2. Older snapshots
+    don't have it, which is not an error - it just means the breakdown isn't
+    available until the next nightly build.
+    """
+    who = row.get("who") or {}
+    if not who:
+        st.caption(
+            "No per-person breakdown for this day. That detail starts with "
+            "the next nightly snapshot build."
+        )
+        return
+
+    present = [c for c in _WHO_COLUMNS
+               if any(slots.get(c) for slots in who.values())]
+    table = [
+        {
+            "Person": names.get(str(uid), f"(user {uid})"),
+            **{c: round(slots.get(c, 0.0), 2) for c in present},
+            "Total": round(sum(slots.values()), 2),
+        }
+        for uid, slots in who.items()
+    ]
+    table.sort(key=lambda r: -r["Total"])
+    st.dataframe(
+        pd.DataFrame(table), hide_index=True, use_container_width=True,
+        column_config={
+            c: st.column_config.NumberColumn(format="%.2f")
+            for c in present + ["Total"]
+        },
+    )
+
+
+def _render_project_hours(job: dict, rows: list, compact: bool = False,
+                          names: dict | None = None,
+                          key_prefix: str = "proj") -> None:
     """Totals and the daily rough/trim/final breakdown for one jobcode."""
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total hours", f"{job['total']:,.1f}")
-    c2.metric("Rough", f"{job['rough']:,.1f}")
-    c3.metric("Trim", f"{job['trim']:,.1f}")
-    c4.metric("Final", f"{job['final']:,.1f}")
+    theme.kpi_row([
+        dict(label="Total hours", value=f"{job['total']:,.1f}", unit="h",
+             accent=theme.INK),
+        dict(label="Rough", value=f"{job['rough']:,.1f}", unit="h",
+             accent=theme.PERI),
+        dict(label="Trim", value=f"{job['trim']:,.1f}", unit="h",
+             accent=theme.SAND),
+        dict(label="Final", value=f"{job['final']:,.1f}", unit="h",
+             accent=theme.GREEN),
+    ])
 
     if job["other"] > 0:
         st.caption(
@@ -591,16 +675,42 @@ def _render_project_hours(job: dict, rows: list, compact: bool = False) -> None:
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
 
+    # Same reason as the phase totals in capacity_service: a daily row can
+    # omit a phase key, and if no row in this job carries one the column
+    # never exists. Seed all four so selection and charting can't fail.
+    for phase in ("rough", "trim", "final", "other"):
+        if phase not in df.columns:
+            df[phase] = 0.0
+    df[["rough", "trim", "final", "other"]] = (
+        df[["rough", "trim", "final", "other"]].fillna(0.0)
+    )
+    if "total" not in df.columns:
+        df["total"] = df[["rough", "trim", "final", "other"]].sum(axis=1)
+
     chart = df.set_index("date")[["rough", "trim", "final"]]
     if chart.to_numpy().sum() > 0:
-        st.bar_chart(chart, height=220 if compact else 300)
+        theme.show(
+            theme.stacked_bar(
+                chart.index,
+                {"Rough": chart["rough"], "Trim": chart["trim"],
+                 "Final": chart["final"]},
+                colors=[theme.PERI, theme.SAND, theme.GREEN],
+                height=220 if compact else 300,
+            ),
+            # Two events on the same day can match the same jobcode, which
+            # draws byte-identical figures; without a key Streamlit treats
+            # them as one element and raises DuplicateElementId.
+            key=f"hourschart_{key_prefix}_{job['jobcode_id']}",
+        )
     else:
         st.caption("No rough/trim/final hours - all time on this job is "
                    "other work.")
 
-    st.dataframe(
-        df[["date", "rough", "trim", "final", "other", "total"]]
-          .sort_values("date", ascending=False),
+    shown = (df[["date", "rough", "trim", "final", "other", "total"]]
+               .sort_values("date", ascending=False)
+               .reset_index(drop=True))
+    picked = st.dataframe(
+        shown,
         hide_index=True,
         use_container_width=True,
         column_config={
@@ -612,7 +722,25 @@ def _render_project_hours(job: dict, rows: list, compact: bool = False) -> None:
             "total": st.column_config.NumberColumn(format="%.2f"),
         },
         height=260 if compact else 420,
+        # Streamlit selects rows, not cells - so picking the day gives the
+        # whole day's split by person rather than just the one figure that
+        # was clicked, which is more useful anyway.
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"dayrows_{key_prefix}_{job['jobcode_id']}",
     )
+
+    picked_rows = getattr(getattr(picked, "selection", None), "rows", None) or []
+    if picked_rows:
+        idx = picked_rows[0]
+        day_value = shown.iloc[idx]["date"]
+        day_str = pd.to_datetime(day_value).strftime("%Y-%m-%d")
+        source = next((r for r in rows if str(r.get("date")) == day_str), None)
+        st.markdown(f"**Who logged these hours — "
+                    f"{pd.to_datetime(day_value):%a %d %b %Y}**")
+        _render_day_attribution(source or {}, names or {})
+    else:
+        st.caption("Select a day above to see who logged its hours.")
 
     if job["people"]:
         st.caption("Worked by: " + ", ".join(job["people"]))
@@ -620,7 +748,7 @@ def _render_project_hours(job: dict, rows: list, compact: bool = False) -> None:
 
 def _render_projects_section(capacity_service) -> None:
     """Pick a job, see its daily hours split rough / trim / final."""
-    st.markdown("###### Hours by project")
+    st.markdown("## Hours by project")
 
     window = st.selectbox(
         "History",
@@ -668,7 +796,8 @@ def _render_projects_section(capacity_service) -> None:
         + ("" if job["active"] else "  ·  INACTIVE")
     )
 
-    _render_project_hours(job, data["daily"].get(picked_id, []))
+    _render_project_hours(job, data["daily"].get(picked_id, []),
+                          names=data.get("names"), key_prefix="section")
 
     # Other jobcodes on the same site - a job usually has several, split by
     # vertical, and a PM thinks of them as one project.
@@ -715,7 +844,7 @@ def _render_capacity_view(capacity_service) -> None:
     trusted (901 Seabury Phase 2 sat at 0% with 298 hours logged against
     it). Hours are the only record of what really happened.
     """
-    st.subheader("Capacity")
+    st.markdown("## Capacity")
 
     ctrl_left, ctrl_right = st.columns([3, 1], vertical_alignment="bottom")
     with ctrl_left:
@@ -766,15 +895,21 @@ def _render_capacity_view(capacity_service) -> None:
     totals = data["totals"]
     worked = totals["worked"] or 1
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Hours worked", f"{totals['worked']:,.0f}")
-    m2.metric("On projects", f"{totals['project']:,.0f}",
-              f"{totals['project'] / worked * 100:.1f}% of worked")
-    m3.metric("Overhead", f"{totals['overhead']:,.0f}",
-              f"{totals['overhead'] / worked * 100:.1f}% of worked",
-              delta_color="inverse")
-    m4.metric("Capacity staff", len(data["people"]),
-              f"{len(data['office'])} office excluded", delta_color="off")
+    project_share = totals["project"] / worked * 100
+    overhead_share = totals["overhead"] / worked * 100
+
+    theme.kpi_row([
+        dict(label="Hours worked", value=f"{totals['worked']:,.0f}",
+             unit="h", accent=theme.PERI),
+        dict(label="On projects", value=f"{totals['project']:,.0f}", unit="h",
+             note=f"{project_share:.1f}% of worked", note_tone="up",
+             accent=theme.GREEN),
+        dict(label="Overhead", value=f"{totals['overhead']:,.0f}", unit="h",
+             note=f"{overhead_share:.1f}% of worked", note_tone="down",
+             accent=theme.CORAL),
+        dict(label="Capacity staff", value=len(data["people"]),
+             note=f"{len(data['office'])} office excluded", accent=theme.SLATE),
+    ])
 
     if totals["untagged"] > 0:
         st.caption(
@@ -782,11 +917,36 @@ def _render_capacity_view(capacity_service) -> None:
             "counted as project work. Worth chasing if that number is large."
         )
 
-    st.divider()
+    st.write("")
 
     # ---- where the hours went -------------------------------------------
-    st.markdown("###### Where the hours went")
+    st.markdown("## Where the hours went")
     bucket_total = sum(data["buckets"].values()) or 1
+
+    with st.container(border=True):
+        kind_totals = {}
+        for b, h in data["buckets"].items():
+            kind_totals[_bucket_kind(b)] = kind_totals.get(_bucket_kind(b), 0) + h
+        order = ["Project", "Overhead", "Unavailable", "Untagged"]
+        present = [k for k in order if kind_totals.get(k)]
+        ring_left, ring_right = st.columns([1, 1.5], gap="large")
+        with ring_left:
+            st.markdown("### By kind")
+            theme.show(theme.donut(
+                present,
+                [kind_totals[k] for k in present],
+                center_value=f"{bucket_total:,.0f}h",
+                center_label="logged",
+                colors=[{"Project": theme.GREEN, "Overhead": theme.CORAL,
+                         "Unavailable": theme.SLATE,
+                         "Untagged": theme.ROSE}[k] for k in present],
+            ))
+        with ring_right:
+            st.markdown("### Biggest buckets")
+            top = sorted(data["buckets"].items(), key=lambda kv: -kv[1])[:6]
+            theme.show(theme.hbar([label(b) for b, _ in top],
+                                  [h for _, h in top], suffix="h"))
+
     bucket_rows = [
         {
             "Bucket": label(b),
@@ -796,25 +956,27 @@ def _render_capacity_view(capacity_service) -> None:
         }
         for b, h in sorted(data["buckets"].items(), key=lambda kv: -kv[1])
     ]
-    st.dataframe(
-        pd.DataFrame(bucket_rows),
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Hours": st.column_config.NumberColumn(format="%.1f"),
-            "Share": st.column_config.ProgressColumn(
-                "Share", format="%.1f%%", min_value=0, max_value=100),
-        },
-    )
+    with st.container(border=True):
+        st.markdown("### Every bucket")
+        st.dataframe(
+            pd.DataFrame(bucket_rows),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Hours": st.column_config.NumberColumn(format="%.1f"),
+                "Share": st.column_config.ProgressColumn(
+                    "Share", format="%.1f%%", min_value=0, max_value=100),
+            },
+        )
     st.caption(
         "Time off and unpaid break are excluded from utilisation entirely - "
         "capacity that never existed, rather than capacity that went unused."
     )
 
-    st.divider()
+    st.write("")
 
     # ---- people ----------------------------------------------------------
-    st.markdown("###### People")
+    st.markdown("## People")
     roles = sorted({p["role"] for p in data["people"]})
     chosen = st.multiselect("Filter by role", roles, default=roles)
 
@@ -832,17 +994,18 @@ def _render_capacity_view(capacity_service) -> None:
     ]
 
     if people_rows:
-        st.dataframe(
-            pd.DataFrame(people_rows),
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Worked": st.column_config.NumberColumn(format="%.1f"),
-                "On projects": st.column_config.NumberColumn(format="%.1f"),
-                "Utilisation": st.column_config.ProgressColumn(
-                    "Utilisation", format="%.1f%%", min_value=0, max_value=100),
-            },
-        )
+        with st.container(border=True):
+            st.dataframe(
+                pd.DataFrame(people_rows),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Worked": st.column_config.NumberColumn(format="%.1f"),
+                    "On projects": st.column_config.NumberColumn(format="%.1f"),
+                    "Utilisation": st.column_config.ProgressColumn(
+                        "Utilisation", format="%.1f%%", min_value=0, max_value=100),
+                },
+            )
         st.caption(
             "Utilisation is project hours divided by hours worked. A low "
             "figure means time went to admin or drive - not that someone "
@@ -884,39 +1047,35 @@ def render():
     """
     Dashboard page.
     """
+    # Called here as well as in main.py because pages/ makes this a Streamlit
+    # multipage app: opening "dashboard" from the sidebar runs this file
+    # directly and never touches main.py. Injecting the CSS twice in one run
+    # is harmless; not injecting it at all leaves the page unstyled.
+    theme.apply_theme()
+
     service = DashboardService()
     capacity_service = CapacityService()
     kpis = service.get_kpis()
 
-    st.title("🏠 Operations Command Center")
-    st.write("Welcome to the Operations Command Center.")
-    st.divider()
+    theme.page_title(
+        "Operations Command Center",
+        "Live from Zoho CRM" if kpis["source"] == "zoho"
+        else "Showing the last cached pull - Zoho didn't answer just now",
+    )
 
-    col1, col2, col3, col4 = st.columns(4)
+    theme.kpi_row([
+        dict(label="Projects", value=kpis["projects"], accent=theme.PERI),
+        dict(label="Tasks", value=kpis["tasks"], accent=theme.GREEN),
+        dict(label="Cases", value=kpis["cases"], accent=theme.CORAL),
+        dict(label="CRM users", value=kpis["users"], accent=theme.SLATE),
+    ])
 
-    with col1:
-        st.metric("Projects", kpis["projects"])
+    if kpis["source"] != "zoho" and kpis.get("error"):
+        st.caption(f"Zoho error: {kpis['error']}")
 
-    with col2:
-        st.metric("Tasks", kpis["tasks"])
+    st.write("")
 
-    with col3:
-        st.metric("Cases", kpis["cases"])
-
-    with col4:
-        st.metric("CRM Users", kpis["users"])
-
-    if kpis["source"] == "zoho":
-        st.success("Connected to Zoho CRM")
-    else:
-        st.warning(
-            "Showing last cached data - couldn't reach Zoho just now."
-            + (f" ({kpis['error']})" if kpis.get("error") else "")
-        )
-
-    st.divider()
-
-    schedule_tab, capacity_tab = st.tabs(["📅 Schedule", "📊 Capacity"])
+    schedule_tab, capacity_tab = st.tabs(["Schedule", "Capacity"])
 
     with schedule_tab:
         _render_calendar_view(service)
@@ -931,6 +1090,7 @@ if __name__ == "__main__":
         page_icon="🏠",
         layout="wide",
     )
+    theme.apply_theme()
     if check_password():
         render()
     else:

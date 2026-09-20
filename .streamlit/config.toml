@@ -1,0 +1,17 @@
+# Save this as .streamlit/config.toml in your project root.
+# It themes Streamlit's own widgets so they match theme.py. Both are needed:
+# this file handles what CSS can't reach cleanly (charts, spinners, selections).
+
+[theme]
+base = "light"
+primaryColor = "#8CA6E8"
+backgroundColor = "#F7F5F2"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#141B34"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+runOnSave = true

@@ -204,7 +204,7 @@ class CapacityService:
         snap = load_snapshot()
         if snap.get("error"):
             return {"error": snap["error"], "jobs": [], "daily": {},
-                    "window": None}
+                    "names": {}, "window": None}
 
         proj = snap.get("projects", {})
         all_jobs = proj.get("jobs", [])
@@ -223,10 +223,17 @@ class CapacityService:
                     if r["date"] >= cutoff]
             if not rows:
                 continue
-            rough = sum(r["rough"] for r in rows)
-            trim = sum(r["trim"] for r in rows)
-            final = sum(r["final"] for r in rows)
-            other = sum(r["other"] for r in rows)
+            # Rows written by older snapshot builds omit a phase key entirely
+            # when that phase has no hours, rather than storing a zero. Reading
+            # them with [] raises KeyError on the first such row, so every
+            # phase is read defensively and a missing/None value counts as 0.
+            def _phase(name: str) -> float:
+                return sum((r.get(name) or 0) for r in rows)
+
+            rough = _phase("rough")
+            trim = _phase("trim")
+            final = _phase("final")
+            other = _phase("other")
             jobs.append({
                 **job,
                 "job_number": (job.get("short_code") or "").strip()
@@ -249,6 +256,10 @@ class CapacityService:
         # than whatever has the most admin time against it.
         jobs.sort(key=lambda r: (-r["install_total"], -r["total"]))
         return {"jobs": jobs, "daily": daily, "error": None,
+                # Daily rows carry "who" keyed by user id (schema 2+); the
+                # name map lives under capacity, so pass it through rather
+                # than making every caller dig for it.
+                "names": snap.get("capacity", {}).get("names", {}),
                 "window": snap.get("window")}
 
     @staticmethod

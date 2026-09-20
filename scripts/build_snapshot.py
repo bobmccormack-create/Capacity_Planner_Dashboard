@@ -54,11 +54,35 @@ LOCAL_COPY = ROOT / ".cache" / SNAPSHOT_NAME
 # Mirrors capacity_service.install_phase_of - the three phases a budget is
 # written against. "Shading Install" is field work but is budgeted
 # separately, so it is not part of rough/trim/final.
-_PHASE_TO_INSTALL = {
-    "prewire": "field_rough",
-    "trim": "field_trim",
-    "finish": "field_final",
+# Raw QuickBooks Time phase -> the column names used in the HOURS CONSUMED
+# block of the Project Tools workbooks. Keeping the full breakdown, rather
+# than collapsing everything but rough/trim/final into "other", is what lets
+# the labour log mirror that block column for column.
+#
+# T&M has no phase equivalent - it's a contract type in the workbooks, not
+# something anyone clocks against - so that column is always empty.
+_PHASE_TO_COLUMN = {
+    "prewire": "rough",
+    "trim": "trim",
+    "finish": "final",
+    "programming": "prog",
+    "shading install": "shade",
+    "shading pm": "shade",
+    "lighting": "light",
+    "project management": "pm",
+    "design - engineering": "eng",
+    "production - engineering": "eng",
+    "drive": "travel",
+    "travel": "travel",
+    "commute": "travel",
+    "admin": "admin",
+    "service": "service",
+    "warranty": "service",
 }
+
+# In workbook order.
+COLUMNS = ["rough", "trim", "final", "prog", "shade", "light", "pm", "eng",
+           "travel", "admin", "service", "other"]
 
 
 def log(msg: str) -> None:
@@ -201,6 +225,13 @@ def build_payload(months: int) -> dict:
     daily: dict = {}
     totals_by_job: dict = {}
     job_people: dict = {}
+    # Who logged what, per job / day / phase. The job-level "people" list
+    # below answers "who has ever touched this site"; this answers "who put
+    # those 16 trim hours in on Tuesday", which is the question a PM actually
+    # asks when a number looks wrong. Keyed by user id, not name - names are
+    # already in capacity.names and repeating them here would roughly double
+    # the cost of the addition.
+    daily_who: dict = {}
 
     for t in timesheets:
         jid = t.get("jobcode_id")
@@ -210,11 +241,15 @@ def build_payload(months: int) -> dict:
         if h <= 0:
             continue
         phase = ((t.get("customfields") or {}).get(phase_field) or "").strip().lower()
-        slot = _PHASE_TO_INSTALL.get(phase, "other")
+        slot = _PHASE_TO_COLUMN.get(phase, "other")
         day = t.get("date")
+        uid = str(t.get("user_id"))
 
         daily.setdefault(jid, {}).setdefault(day, {})
         daily[jid][day][slot] = daily[jid][day].get(slot, 0.0) + h
+        daily_who.setdefault(jid, {}).setdefault(day, {}).setdefault(uid, {})
+        daily_who[jid][day][uid][slot] = (
+            daily_who[jid][day][uid].get(slot, 0.0) + h)
         totals_by_job.setdefault(jid, {})
         totals_by_job[jid][slot] = totals_by_job[jid].get(slot, 0.0) + h
         job_people.setdefault(jid, set()).add(name_of.get(t.get("user_id"), "?"))
@@ -228,10 +263,7 @@ def build_payload(months: int) -> dict:
             "name": job.get("name", f"(jobcode {jid})"),
             "short_code": (job.get("short_code") or "").strip(),
             "active": bool(job.get("active")),
-            "rough": round(mix.get("field_rough", 0.0), 2),
-            "trim": round(mix.get("field_trim", 0.0), 2),
-            "final": round(mix.get("field_final", 0.0), 2),
-            "other": round(mix.get("other", 0.0), 2),
+            **{c: round(mix.get(c, 0.0), 2) for c in COLUMNS},
             "total": round(sum(mix.values()), 2),
             "first_day": days_seen[0] if days_seen else None,
             "last_day": days_seen[-1] if days_seen else None,
@@ -244,11 +276,18 @@ def build_payload(months: int) -> dict:
         daily_out[str(jid)] = [
             {
                 "date": day,
-                "rough": round(by_day[day].get("field_rough", 0.0), 2),
-                "trim": round(by_day[day].get("field_trim", 0.0), 2),
-                "final": round(by_day[day].get("field_final", 0.0), 2),
-                "other": round(by_day[day].get("other", 0.0), 2),
+                # Only non-zero columns are stored. A day with 8 hours of
+                # trim shouldn't carry eleven zeroes - across 1,600 jobcodes
+                # and two years that roughly triples the file for nothing.
+                **{c: round(by_day[day][c], 2) for c in COLUMNS
+                   if by_day[day].get(c)},
                 "total": round(sum(by_day[day].values()), 2),
+                # Same sparse rule: user -> only the phases they actually
+                # logged that day.
+                "who": {
+                    uid: {c: round(h, 2) for c, h in slots.items() if h}
+                    for uid, slots in daily_who.get(jid, {}).get(day, {}).items()
+                },
             }
             for day in sorted(by_day)
         ]
@@ -257,6 +296,10 @@ def build_payload(months: int) -> dict:
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "window": {"start": str(start), "end": str(end), "months": months},
         "source": "quickbooks_time",
+        # 1 = original; 2 adds projects.daily[].who. The app treats a missing
+        # or lower version as "no per-day attribution available" rather than
+        # failing, so an old snapshot on Drive still renders.
+        "schema_version": 2,
         "phase_field": phase_field,
         "entry_count": len(timesheets),
         "capacity": {
