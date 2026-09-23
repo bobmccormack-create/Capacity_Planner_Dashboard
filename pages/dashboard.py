@@ -449,8 +449,9 @@ def _render_day_by_day(display_start: dt.date, range_end: dt.date, events_by_day
             current += dt.timedelta(days=1)
 
 
-def _render_calendar_view(service: DashboardService) -> None:
-    st.markdown("## Schedule")
+def _render_calendar_view(service: DashboardService,
+                          capacity_service=None, person: str = "") -> None:
+    st.markdown("## Schedule" + (f" - {person}" if person else ""))
     st.caption("From Zoho CRM's Calendar - this month and next")
 
     today = dt.date.today()
@@ -467,6 +468,22 @@ def _render_calendar_view(service: DashboardService) -> None:
         return
 
     events = schedule["events"]
+
+    if person and capacity_service is not None:
+        events, dropped = _events_for_person(events, capacity_service, person)
+        if not events:
+            st.info(
+                f"Nothing on the calendar matched {person}'s projects. "
+                "Events are matched to jobcodes by street number and street "
+                "name, so a title with no address in it can't be attributed "
+                "to anyone."
+            )
+            return
+        st.caption(
+            f"Showing {len(events)} of {len(events) + dropped} events - "
+            f"those matching a job {person} has logged time to."
+        )
+
     tech_colors = _assign_tech_colors(events)
 
     # A multi-day job (all-day or otherwise - e.g. a 3-day install running
@@ -581,6 +598,32 @@ def _tokens(text: str) -> tuple:
     nums = {p for p in parts if p.isdigit()}
     words = {p for p in parts if not p.isdigit() and len(p) > 2 and p not in _STOP}
     return nums, words
+
+
+def _events_for_person(events: list, capacity_service, person: str) -> tuple:
+    """
+    (kept, dropped) - events whose title matches a job this person works.
+
+    Zoho titles and QuickBooks Time jobcode names describe the same site
+    differently ("740 Sanchez Rough In" vs "6387 - 740 Sanchez_Av Tech"),
+    so matching needs a shared street number AND a shared word. The number
+    alone isn't enough - "2700 Redwolf" and "2700 Pierce" are different
+    sites.
+    """
+    try:
+        mine = capacity_service.get_project_hours(12, person=person)
+    except Exception as exc:  # noqa: BLE001
+        # Falling back to every event is the safe behaviour, but doing it
+        # silently made a KeyError look like "the filter isn't working".
+        st.warning(f"Couldn't filter the calendar to {person}: {exc}")
+        return events, 0
+    jobs = mine.get("jobs", [])
+    if not jobs:
+        return [], len(events)
+
+    kept = [e for e in events
+            if _match_jobs_for_title(e.get("Event_Title") or "", jobs)]
+    return kept, len(events) - len(kept)
 
 
 def _match_jobs_for_title(title: str, jobs: list) -> list:
@@ -746,7 +789,7 @@ def _render_project_hours(job: dict, rows: list, compact: bool = False,
         st.caption("Worked by: " + ", ".join(job["people"]))
 
 
-def _render_projects_section(capacity_service) -> None:
+def _render_projects_section(capacity_service, person: str = "") -> None:
     """Pick a job, see its daily hours split rough / trim / final."""
     st.markdown("## Hours by project")
 
@@ -759,7 +802,8 @@ def _render_projects_section(capacity_service) -> None:
              "window costs nothing.",
     )
 
-    data = capacity_service.get_project_hours(_WINDOW_CHOICES[window])
+    data = capacity_service.get_project_hours(_WINDOW_CHOICES[window],
+                                              person=person)
     if data["error"]:
         st.warning(f"Couldn't read project hours. ({data['error']})")
         return
@@ -835,7 +879,7 @@ def _render_projects_section(capacity_service) -> None:
                 )
 
 
-def _render_capacity_view(capacity_service) -> None:
+def _render_capacity_view(capacity_service, person: str = "") -> None:
     """
     Where the hours actually went.
 
@@ -1040,7 +1084,7 @@ def _render_capacity_view(capacity_service) -> None:
             )
 
     st.divider()
-    _render_projects_section(capacity_service)
+    _render_projects_section(capacity_service, person)
 
 
 def render():
@@ -1075,13 +1119,25 @@ def render():
 
     st.write("")
 
+    # One dashboard, two scopes. A personal view is the same data filtered,
+    # not a separate app - so the team view can't drift from it.
+    names = capacity_service.people_names()
+    choice = st.selectbox(
+        "View",
+        ["Whole team"] + names,
+        key="view_scope",
+        help="Picking a name narrows the schedule and the project list to "
+             "the jobs that person has logged time to.",
+    )
+    person = "" if choice == "Whole team" else choice
+
     schedule_tab, capacity_tab = st.tabs(["Schedule", "Capacity"])
 
     with schedule_tab:
-        _render_calendar_view(service)
+        _render_calendar_view(service, capacity_service, person)
 
     with capacity_tab:
-        _render_capacity_view(capacity_service)
+        _render_capacity_view(capacity_service, person)
 
 
 if __name__ == "__main__":

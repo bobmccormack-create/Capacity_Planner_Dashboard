@@ -191,8 +191,21 @@ class CapacityService:
             "error": None,
         }
 
+    def people_names(self) -> list:
+        """Everyone with hours, for the view selector."""
+        snap = load_snapshot()
+        if snap.get("error"):
+            return []
+        cap = snap.get("capacity", {})
+        names = {p["name"] for p in cap.get("people", [])}
+        names |= {p["name"] for p in cap.get("office", [])}
+        # Users with no first/last name in QuickBooks Time come through as
+        # "(user 2512448)". Real names only - an ID is never a useful pick.
+        return sorted(n for n in names if not n.startswith("(user "))
+
     def get_project_hours(self, months: int = 3,
-                          projects_only: bool = True) -> dict:
+                          projects_only: bool = True,
+                          person: str = "") -> dict:
         """
         Per-job totals and daily rows, filtered to the last `months` months.
 
@@ -215,9 +228,18 @@ class CapacityService:
         else:
             cutoff = ""
 
+        who = (person or "").strip().lower()
+
         jobs, daily = [], {}
         for job in all_jobs:
             if projects_only and not is_project_job(job.get("name", "")):
+                continue
+            # "My projects" means the ones this person has logged time to.
+            # Taken from the snapshot rather than Zoho ownership, because
+            # who-logged-what is exact while the Zoho-to-jobcode matching
+            # only resolved about 60% of projects.
+            if who and not any(who == n.strip().lower()
+                               for n in job.get("people", [])):
                 continue
             rows = [r for r in all_daily.get(str(job["jobcode_id"]), [])
                     if r["date"] >= cutoff]
