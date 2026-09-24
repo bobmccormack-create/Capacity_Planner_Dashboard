@@ -184,6 +184,13 @@ def forward_capacity(weeks: int = 8, exclude: set | None = None) -> dict:
         if not who:
             continue
         title = ev.get("Event_Title") or "(untitled)"
+        lead = _owner(ev)
+        if ev.get("All_day") or e.date() > s.date():
+            when = "All day"
+        else:
+            # %-I drops the leading zero on Linux but raises on Windows, so
+            # strip it by hand to run the same in both places.
+            when = f"{s:%I:%M %p}".lstrip("0") + " - " + f"{e:%I:%M %p}".lstrip("0")
 
         if TIME_OFF.search(title):
             for p in who:
@@ -198,12 +205,16 @@ def forward_capacity(weeks: int = 8, exclude: set | None = None) -> dict:
             for p in who:
                 people.add(p)
                 booked[(p, d)] += h
-                jobs_on[(p, d)].append(title)
+                jobs_on[(p, d)].append({
+                    "title": title, "hours": round(h, 1), "when": when,
+                    "role": "Lead" if p.lower() == lead.lower() else "Crew",
+                })
 
     rows, conflicts = [], []
     two_weeks = start + dt.timedelta(weeks=2)
     for p in sorted(people):
         by_week = {}
+        days = {}
         free_2w = 0.0
         b_total = a_total = 0.0
         for m in mondays:
@@ -211,14 +222,18 @@ def forward_capacity(weeks: int = 8, exclude: set | None = None) -> dict:
             conflict_days = 0
             for d in _weekdays(m, m + dt.timedelta(days=4)):
                 if d in off[p]:
+                    days[d] = {"off": True, "booked": 0.0, "jobs": []}
                     continue                    # time off: no capacity at all
                 avail = WORKDAY_HOURS
                 raw = booked.get((p, d), 0.0)
+                days[d] = {"off": False, "booked": round(raw, 1),
+                           "jobs": jobs_on.get((p, d), []),
+                           "conflict": raw > CONFLICT_OVER}
                 if raw > CONFLICT_OVER:
                     conflict_days += 1
                     conflicts.append({"person": p, "date": d,
                                       "hours": round(raw, 1),
-                                      "jobs": jobs_on[(p, d)]})
+                                      "jobs": [j["title"] for j in jobs_on[(p, d)]]})
                 used = min(raw, avail)
                 wk_booked += used
                 wk_avail += avail
@@ -232,7 +247,12 @@ def forward_capacity(weeks: int = 8, exclude: set | None = None) -> dict:
             }
             b_total += wk_booked
             a_total += wk_avail
-        rows.append({"name": p, "weeks": by_week,
+        # Nothing booked and no time off anywhere in the window: a name that
+        # appeared on an event but carries no weekday hours (a weekend job,
+        # a malformed entry). A row of zeros is noise, not capacity.
+        if b_total == 0 and not any(v.get("off") for v in days.values()):
+            continue
+        rows.append({"name": p, "weeks": by_week, "days": days,
                      "free_next_2w": round(free_2w, 1),
                      "booked_total": round(b_total, 1),
                      "available_total": round(a_total, 1)})

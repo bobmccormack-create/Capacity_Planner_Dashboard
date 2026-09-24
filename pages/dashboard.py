@@ -1111,6 +1111,43 @@ def _non_field_names(capacity_service) -> set:
     return out
 
 
+@st.dialog("Bookings", width="large")
+def _show_booking_dialog(person: dict, monday: dt.date) -> None:
+    """One tech's week, day by day - what they're on and whether it clashes."""
+    friday = monday + dt.timedelta(days=4)
+    wk = person["weeks"].get(monday, {})
+    st.markdown(f"### {person['name']}")
+    pct = wk.get("pct")
+    st.caption(
+        f"Week of {monday:%b %d} - {friday:%b %d}  ·  "
+        + (f"{wk.get('booked', 0):.0f}h booked of {wk.get('available', 0):.0f}h "
+           f"available ({pct}%)" if pct is not None else "off all week")
+    )
+
+    for i in range(5):
+        day = monday + dt.timedelta(days=i)
+        info = person["days"].get(day)
+        st.markdown(f"**{day:%A, %b %d}**")
+        if not info:
+            st.caption("Nothing scheduled - open for work.")
+            continue
+        if info.get("off"):
+            st.caption("Time off.")
+            continue
+        if not info["jobs"]:
+            st.caption("Nothing scheduled - open for work.")
+            continue
+        if info.get("conflict"):
+            st.warning(f"Double-booked: {info['booked']:.1f}h across "
+                       f"{len(info['jobs'])} jobs on the same day.")
+        for job in info["jobs"]:
+            st.markdown(
+                f"- {job['title']}  \n"
+                f"  <span style='color:#6b7280'>{job['when']}  ·  "
+                f"{job['role']}  ·  {job['hours']:.1f}h</span>",
+                unsafe_allow_html=True)
+
+
 def _render_forward_view(capacity_service) -> None:
     """
     Who's booked, who's free and who's double-booked, from the calendar.
@@ -1144,13 +1181,18 @@ def _render_forward_view(capacity_service) -> None:
     rows = data["people"]
     conflicts = data["conflicts"]
 
-    total_b = sum(r["booked_total"] for r in rows)
-    total_a = sum(r["available_total"] for r in rows)
+    # Booked % over the next two weeks only. Across the whole window it
+    # reads low simply because November isn't scheduled yet - far weeks
+    # fill in over time, so averaging them in understates how busy the
+    # team actually is right now.
+    near = mondays[:2]
+    b2 = sum(r["weeks"][m]["booked"] for r in rows for m in near)
+    a2 = sum(r["weeks"][m]["available"] for r in rows for m in near)
     free_2w = sum(r["free_next_2w"] for r in rows)
     theme.kpi_row([
         dict(label="Field staff", value=len(rows), accent=theme.SLATE),
-        dict(label="Booked",
-             value=f"{total_b / total_a * 100:.0f}%" if total_a else "-",
+        dict(label="Booked, next 2 weeks",
+             value=f"{b2 / a2 * 100:.0f}%" if a2 else "-",
              accent=theme.PERI),
         dict(label="Free, next 2 weeks", value=f"{free_2w:,.0f}h",
              accent=theme.GREEN),
@@ -1189,11 +1231,21 @@ def _render_forward_view(capacity_service) -> None:
     styled = grid.style.apply(
         lambda _: shades.map(lambda c: f"background-color:{c}; color:#1f2328"),
         axis=None)
-    st.dataframe(styled, use_container_width=True,
-                 height=min(38 * len(rows) + 40, 720))
-    st.caption("Green = room to add work. Amber = 90%+ booked. "
+    event = st.dataframe(styled, use_container_width=True,
+                         height=min(38 * len(rows) + 40, 720),
+                         on_select="rerun", selection_mode="single-cell",
+                         key="fwd_grid")
+    st.caption("Click any week to see what that tech is booked on. "
+               "Green = room to add work. Amber = 90%+ booked. "
                "Red with ! = double-booked on that many days. "
                "Grey = off all week.")
+
+    cells = (getattr(getattr(event, "selection", None), "cells", None) or [])
+    if cells:
+        row_pos, col_label = cells[0]
+        by_label = dict(zip(labels, mondays))
+        if 0 <= row_pos < len(rows) and col_label in by_label:
+            _show_booking_dialog(rows[row_pos], by_label[col_label])
 
     left, right = st.columns(2)
 
