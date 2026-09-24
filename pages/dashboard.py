@@ -7,6 +7,7 @@ import streamlit as st
 
 import pandas as pd
 
+from app.services import forward_capacity as fwd
 from app.services.capacity_service import CapacityService
 from app.services.dashboard_service import DashboardService
 from app.services.labor_buckets import (
@@ -1087,6 +1088,152 @@ def _render_capacity_view(capacity_service, person: str = "") -> None:
     _render_projects_section(capacity_service, person)
 
 
+_FWD_FREE = "#dcefe3"
+_FWD_BUSY = "#b9dfc6"
+_FWD_FULL = "#fbe6a6"
+_FWD_CONFLICT = "#f4c2c2"
+_FWD_OFF = "#e7e5e0"
+
+
+def _non_field_names(capacity_service) -> set:
+    """
+    Office, PM and engineering staff, taken from how they actually log time
+    rather than a hand-kept list. They turn up on the calendar now and then
+    but aren't field capacity, and would clutter the grid with empty rows.
+    """
+    try:
+        cap = capacity_service.get_capacity(3)
+    except Exception:  # noqa: BLE001
+        return set()
+    out = {p["name"] for p in cap.get("office", [])}
+    out |= {p["name"] for p in cap.get("people", [])
+            if p.get("role") in ("project_mgmt", "engineering", "office")}
+    return out
+
+
+def _render_forward_view(capacity_service) -> None:
+    """
+    Who's booked, who's free and who's double-booked, from the calendar.
+
+    Trusted because the calendar held 95-115% of what field techs actually
+    logged once participants are counted alongside the lead tech - see
+    scripts/schedule_coverage.py.
+    """
+    st.markdown("## Forward capacity")
+    st.caption("From the Zoho calendar - lead tech and crew both counted. "
+               "Time off lowers capacity; it isn't booked work.")
+
+    c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+    with c1:
+        weeks = st.select_slider("Weeks ahead", options=[2, 4, 6, 8, 12],
+                                 value=8, key="fwd_weeks")
+    with c2:
+        if st.button("Reload", key="fwd_reload", use_container_width=True):
+            fwd.clear_cache()
+            st.rerun()
+
+    data = fwd.forward_capacity(weeks, exclude=_non_field_names(capacity_service))
+    if data["error"] and not data["people"]:
+        st.warning(f"Couldn't read the calendar. ({data['error']})")
+        return
+    if not data["people"]:
+        st.info("Nothing scheduled in this window.")
+        return
+
+    mondays = data["weeks"]
+    rows = data["people"]
+    conflicts = data["conflicts"]
+
+    total_b = sum(r["booked_total"] for r in rows)
+    total_a = sum(r["available_total"] for r in rows)
+    free_2w = sum(r["free_next_2w"] for r in rows)
+    theme.kpi_row([
+        dict(label="Field staff", value=len(rows), accent=theme.SLATE),
+        dict(label="Booked",
+             value=f"{total_b / total_a * 100:.0f}%" if total_a else "-",
+             accent=theme.PERI),
+        dict(label="Free, next 2 weeks", value=f"{free_2w:,.0f}h",
+             accent=theme.GREEN),
+        dict(label="Double-bookings", value=len(conflicts), accent=theme.CORAL),
+    ])
+
+    # ---- heatmap ---------------------------------------------------------
+    st.markdown("###### Booked, by week")
+    labels = [f"{m:%b %d}" for m in mondays]
+    text, color = {}, {}
+    for r in rows:
+        t_row, c_row = [], []
+        for m in mondays:
+            w = r["weeks"][m]
+            if w["pct"] is None:
+                t_row.append("off")
+                c_row.append(_FWD_OFF)
+                continue
+            cell = f"{w['pct']}%"
+            if w["conflict_days"]:
+                cell += f" !{w['conflict_days']}"
+                c_row.append(_FWD_CONFLICT)
+            elif w["pct"] >= 90:
+                c_row.append(_FWD_FULL)
+            elif w["pct"] >= 60:
+                c_row.append(_FWD_BUSY)
+            else:
+                c_row.append(_FWD_FREE)
+            t_row.append(cell)
+        text[r["name"]] = t_row
+        color[r["name"]] = c_row
+
+    grid = pd.DataFrame.from_dict(text, orient="index", columns=labels)
+    shades = pd.DataFrame.from_dict(color, orient="index", columns=labels)
+    grid.index.name = "Tech"
+    styled = grid.style.apply(
+        lambda _: shades.map(lambda c: f"background-color:{c}; color:#1f2328"),
+        axis=None)
+    st.dataframe(styled, use_container_width=True,
+                 height=min(38 * len(rows) + 40, 720))
+    st.caption("Green = room to add work. Amber = 90%+ booked. "
+               "Red with ! = double-booked on that many days. "
+               "Grey = off all week.")
+
+    left, right = st.columns(2)
+
+    # ---- open capacity ---------------------------------------------------
+    with left:
+        st.markdown("###### Open capacity, next 2 weeks")
+        free = sorted((r for r in rows if r["free_next_2w"] >= 8),
+                      key=lambda r: -r["free_next_2w"])
+        if free:
+            st.dataframe(
+                pd.DataFrame([{"Tech": r["name"],
+                               "Free hours": r["free_next_2w"],
+                               "Free days": round(r["free_next_2w"]
+                                                  / fwd.WORKDAY_HOURS, 1)}
+                              for r in free]),
+                hide_index=True, use_container_width=True,
+                column_config={"Free hours":
+                               st.column_config.NumberColumn(format="%.0f")})
+        else:
+            st.caption("Nobody has a full free day in the next two weeks.")
+
+    # ---- conflicts -------------------------------------------------------
+    with right:
+        st.markdown("###### Double-bookings")
+        if conflicts:
+            st.dataframe(
+                pd.DataFrame([{"Date": c["date"], "Tech": c["person"],
+                               "Booked": c["hours"],
+                               "Jobs": " + ".join(c["jobs"])}
+                              for c in conflicts]),
+                hide_index=True, use_container_width=True,
+                column_config={
+                    "Date": st.column_config.DateColumn(format="ddd MMM D"),
+                    "Booked": st.column_config.NumberColumn(format="%.1fh")})
+            st.caption("Someone on two jobs the same day. Fix these "
+                       "before the day arrives.")
+        else:
+            st.caption("No double-bookings in this window.")
+
+
 def render():
     """
     Dashboard page.
@@ -1131,10 +1278,14 @@ def render():
     )
     person = "" if choice == "Whole team" else choice
 
-    schedule_tab, capacity_tab = st.tabs(["Schedule", "Capacity"])
+    schedule_tab, forward_tab, capacity_tab = st.tabs(
+        ["Schedule", "Forward capacity", "Capacity"])
 
     with schedule_tab:
         _render_calendar_view(service, capacity_service, person)
+
+    with forward_tab:
+        _render_forward_view(capacity_service)
 
     with capacity_tab:
         _render_capacity_view(capacity_service, person)
